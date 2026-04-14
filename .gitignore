@@ -1,0 +1,31 @@
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# PyInstaller build artifacts (spec file is committed)
+
+# Sample data — raw customer recordings, not committed
+sample_data/
+
+# OS
+Thumbs.db
+.DS_Store

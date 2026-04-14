@@ -1,0 +1,69 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+a = Analysis(
+    ['src/ephys_analysis/__main__.py'],
+    pathex=['src'],
+    binaries=[],
+    datas=[],
+    hiddenimports=[
+        'ephys_analysis',
+        'ephys_analysis.core',
+        'ephys_analysis.core.abf_io',
+        'ephys_analysis.core.signal',
+        'ephys_analysis.core.spike',
+        'ephys_analysis.core.qc',
+        'ephys_analysis.core.types',
+        'ephys_analysis.protocols',
+        'ephys_analysis.protocols.rmp',
+        'ephys_analysis.protocols.ri_ih',
+        'ephys_analysis.protocols.ap',
+        'ephys_analysis.protocols.ramp',
+        'ephys_analysis.protocols.ahp',
+        'ephys_analysis.protocols.one_s_ap',
+        'ephys_analysis.gui',
+        'ephys_analysis.gui.main_window',
+        'ephys_analysis.gui.widgets',
+        'ephys_analysis.gui.widgets.plot_canvas',
+        'ephys_analysis.gui.widgets.trace_viewer',
+        'ephys_analysis.gui.widgets.phase_plot',
+        'ephys_analysis.gui.dialogs',
+        'ephys_analysis.gui.dialogs.qc_review',
+        'ephys_analysis.gui.dialogs.duplicate_resolver',
+        'ephys_analysis.gui.dialogs.nominal_vars',
+        'ephys_analysis.io',
+        'ephys_analysis.io.scanner',
+        'ephys_analysis.io.excel_export',
+        'ephys_analysis.io.nominal',
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='Kacz_Lab_Ephys',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    icon=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='Kacz_Lab_Ephys',
+)

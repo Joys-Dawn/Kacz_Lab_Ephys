@@ -1,0 +1,10 @@
+# Protocol name constants (exact abf.protocol strings)
+PROTO_RMP = "2. Resting Membrane Potential"
+PROTO_RI_IH = "4. Ih and Input Resistance"
+PROTO_AP_COARSE = "5a. Single AP coarse"
+PROTO_AP_FINE = "5b. Single AP fine"
+PROTO_RAMP = "6. Ramp 6s"
+PROTO_AHP_5 = "7. 5 Spike AHP"
+PROTO_AHP_25 = "8. 25 Spike AHP"
+PROTO_1S_AP = "9. 1s AP Firing"
+PROTO_AHP_50 = "11. 50 Spike AHP"
