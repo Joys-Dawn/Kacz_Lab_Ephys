@@ -59,14 +59,20 @@ def analyze_one_s_ap(
         )
 
         # Spec rule: reject sweeps with > 50 spikes (genuinely hyper-firing
-        # cells flagged for user review). Zero the count/ISI but preserve
-        # raw_spike_count and set rejected=True for the hyper-firing export.
+        # cells flagged for user review). spike_count / firing_freq_hz / ISI
+        # are blanked (None / []) so the rejected sweep's columns are NaN in
+        # Excel — a zero would pull cross-cell averages toward zero, which is
+        # the bug a sentinel-NaN avoids. raw_spike_count is preserved.
         rejected = raw_spike_count > 50
-        spike_count = 0 if rejected else raw_spike_count
+        spike_count: int | None
+        ff: float | None
         if rejected:
+            spike_count = None
+            ff = None
             isi_ms = []
-
-        ff = spike_count / step_duration if step_duration > 0 else 0.0
+        else:
+            spike_count = raw_spike_count
+            ff = (raw_spike_count / step_duration) if step_duration > 0 else 0.0
 
         sweeps.append(OneSAPSweep(
             current_pa=currents[sweep_idx],
@@ -77,14 +83,24 @@ def analyze_one_s_ap(
             raw_spike_count=raw_spike_count,
         ))
 
-        if spike_count > 0 and first_sweep == -1:
+        # Skip rejected sweeps in every summary metric — they have no usable
+        # FF, so they must not be eligible for First / Max / Rheobase SU.
+        if rejected:
+            # Rheobase SU FF picks the *first* sweep above rheobase. If that
+            # sweep is rejected the metric is left at 0 — walking to the next
+            # eligible sweep would silently change which sweep the metric
+            # reports. Leaves a 0 the user can spot against the rejected mark.
+            if rheobase_pa > 0 and currents[sweep_idx] > rheobase_pa:
+                rheobase_su_found = True
+            continue
+
+        if spike_count and first_sweep == -1:
             first_sweep = sweep_idx
             first_ff = ff
 
-        if ff > max_ff:
+        if ff is not None and ff > max_ff:
             max_ff = ff
 
-        # Rheobase SU FF: FF at first sweep with current > rheobase
         if rheobase_pa > 0 and currents[sweep_idx] > rheobase_pa and not rheobase_su_found:
             rheobase_su_ff = ff
             rheobase_su_found = True
@@ -100,7 +116,10 @@ def analyze_one_s_ap(
         tolerance = step_size / 2.0
         diffs = [abs(c - ithresh_pa) for c in currents]
         nearest_idx = min(range(len(currents)), key=lambda i: diffs[i])
-        if diffs[nearest_idx] <= tolerance:
+        # If the nearest sweep is hyper-firing-rejected its FF is None — leave
+        # ithresh_ff blank rather than walking to a different sweep, which
+        # would change which sweep the metric reports without flagging it.
+        if diffs[nearest_idx] <= tolerance and not sweeps[nearest_idx].rejected:
             ithresh_ff = sweeps[nearest_idx].firing_freq_hz
 
     return OneSAPResult(

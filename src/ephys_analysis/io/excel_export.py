@@ -108,7 +108,12 @@ def _firing_row(s: SampleResult) -> dict | None:
     for sw in s.one_s_ap.sweeps:
         row[f"FF {sw.current_pa:.0f}pA"] = sw.firing_freq_hz
     for sw in s.one_s_ap.sweeps:
-        mean_isi = sum(sw.isi_ms) / len(sw.isi_ms) if sw.isi_ms else 0.0
+        if sw.rejected:
+            mean_isi = None
+        elif sw.isi_ms:
+            mean_isi = sum(sw.isi_ms) / len(sw.isi_ms)
+        else:
+            mean_isi = 0.0
         row[f"ISI {sw.current_pa:.0f}pA"] = mean_isi
     return row
 

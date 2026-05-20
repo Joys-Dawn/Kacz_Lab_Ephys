@@ -86,11 +86,13 @@ class AHPResult:
 @dataclass
 class OneSAPSweep:
     current_pa: float
-    spike_count: int
-    firing_freq_hz: float
+    # spike_count / firing_freq_hz are None when the sweep was rejected for
+    # hyper-firing (raw count > 50). None — not zero — so cross-cell averages
+    # over the per-sweep FF columns exclude rejected sweeps via NaN rather
+    # than dragging the mean toward zero. raw_spike_count is always populated.
+    spike_count: int | None
+    firing_freq_hz: float | None
     isi_ms: list[float] = field(default_factory=list)
-    # True if raw count exceeded 50 spikes (spec's hyper-firing rejection);
-    # spike_count and isi_ms are zeroed in that case, raw_spike_count preserved.
     rejected: bool = False
     raw_spike_count: int = 0
 

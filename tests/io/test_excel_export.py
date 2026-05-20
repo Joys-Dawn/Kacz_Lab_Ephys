@@ -330,6 +330,56 @@ class TestExportRiIhContaminatedSweeps:
         assert len(df) == 2
 
 
+class TestRejectedSweepColumnsAreNaN:
+    """A hyper-firing-rejected sweep's per-sweep columns (FF / ISI) must
+    appear as NaN in the main exports — not zero. A zero is treated as a
+    real value by cross-cell averages and silently pulls them toward zero,
+    which is the exact bug the rejection mechanism is supposed to prevent.
+    """
+
+    def test_per_sweep_ff_is_nan(self, tmp_path):
+        s = _make_passed_sample()
+        s.one_s_ap.sweeps.append(
+            OneSAPSweep(
+                current_pa=900.0, spike_count=None, firing_freq_hz=None,
+                rejected=True, raw_spike_count=312,
+            )
+        )
+
+        path = export_passed([s], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="1s Firing")
+
+        assert pd.isna(df["FF 900pA"].iloc[0])
+
+    def test_per_sweep_isi_is_nan(self, tmp_path):
+        s = _make_passed_sample()
+        s.one_s_ap.sweeps.append(
+            OneSAPSweep(
+                current_pa=900.0, spike_count=None, firing_freq_hz=None,
+                rejected=True, raw_spike_count=312, isi_ms=[],
+            )
+        )
+
+        path = export_passed([s], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="1s Firing")
+
+        assert pd.isna(df["ISI 900pA"].iloc[0])
+
+    def test_fully_compiled_per_sweep_ff_is_nan(self, tmp_path):
+        s = _make_passed_sample()
+        s.one_s_ap.sweeps.append(
+            OneSAPSweep(
+                current_pa=900.0, spike_count=None, firing_freq_hz=None,
+                rejected=True, raw_spike_count=312,
+            )
+        )
+
+        path = export_passed([s], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert pd.isna(df["FF 900pA"].iloc[0])
+
+
 class TestExportHyperfiringSweeps:
     def test_no_rejected_sweeps_returns_none(self, tmp_path):
         result = export_hyperfiring_sweeps([_make_passed_sample()], tmp_path)
@@ -340,7 +390,7 @@ class TestExportHyperfiringSweeps:
         s = _make_passed_sample()
         s.one_s_ap.sweeps.append(
             OneSAPSweep(
-                current_pa=750.0, spike_count=0, firing_freq_hz=0.0,
+                current_pa=750.0, spike_count=None, firing_freq_hz=None,
                 rejected=True, raw_spike_count=312,
             )
         )
