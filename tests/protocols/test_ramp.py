@@ -19,3 +19,14 @@ class TestAnalyzeRamp:
         assert 50.0 < result.rheobase_pa < 1000.0, (
             f"Rheobase {result.rheobase_pa} pA outside expected range"
         )
+
+
+class TestNoSpikeDetected:
+    def test_returns_none_when_response_never_crosses_threshold(self, abf_ramp):
+        abf = load_abf(abf_ramp)
+        # Flatten the response signal so there is no dV/dt threshold crossing.
+        abf.data[0, :] = -65.0
+
+        result = analyze_ramp(abf)
+
+        assert result is None

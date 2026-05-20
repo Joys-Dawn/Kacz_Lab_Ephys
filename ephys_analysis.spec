@@ -25,7 +25,7 @@ a = Analysis(
         'ephys_analysis.gui.widgets',
         'ephys_analysis.gui.widgets.plot_canvas',
         'ephys_analysis.gui.widgets.trace_viewer',
-        'ephys_analysis.gui.widgets.phase_plot',
+        'ephys_analysis.gui.widgets.ap_threshold_picker',
         'ephys_analysis.gui.dialogs',
         'ephys_analysis.gui.dialogs.qc_review',
         'ephys_analysis.gui.dialogs.duplicate_resolver',

@@ -104,7 +104,7 @@ def _analyze_ap(abf: pyabf.ABF) -> APFineResult | None:
         if peak_amp < 0.0:
             continue
 
-        voltage_threshold_mv, _, phase_v, phase_dvdt = vthresh_result
+        voltage_threshold_mv, _ = vthresh_result
 
         # This is the first sweep with a spike — extract all metrics
         baseline = windowed_mean(response, BASELINE_START, BASELINE_END, rate)
@@ -116,13 +116,21 @@ def _analyze_ap(abf: pyabf.ABF) -> APFineResult | None:
         ap_segment = response[i0:i1]
         dt_ms = 1000.0 / rate
         dvdt = np.diff(ap_segment) / dt_ms
-        max_rise_slope = float(np.max(dvdt))
-        # Max Decay: min dV/dt only where V[i] > 0 — i.e. during the above-zero
-        # portion of the AP. Clampfit convention: the "AP decay" ends when V
-        # returns to 0 mV; dV/dt beyond that is AHP dynamics, not AP decay.
+        # Max Rise / Max Decay are restricted to the AP's above-zero phase to
+        # match Clampfit. Forward-diff convention: dvdt[i] = (V[i+1]-V[i])/dt.
+        # For Max Rise, the "rising sample" is V[i+1] — keep dvdt[i] when
+        # V[i+1] > 0 so we only count slopes that land on the overshoot, not
+        # noise spikes earlier in the rise. For Max Decay, the "still-spiking
+        # sample" is V[i] — keep dvdt[i] when V[i] > 0 so AHP dynamics after
+        # V crosses 0 don't enter the min. Clean APs converge with both
+        # conventions; weak/noisy APs only match the customer when these
+        # masks are applied.
         v_before = ap_segment[:-1]
-        above_zero = v_before > 0
-        max_decay_slope = float(np.min(dvdt[above_zero]))
+        v_after = ap_segment[1:]
+        rise_mask = v_after > 0
+        decay_mask = v_before > 0
+        max_rise_slope = float(np.max(dvdt[rise_mask])) if rise_mask.any() else float(np.max(dvdt))
+        max_decay_slope = float(np.min(dvdt[decay_mask])) if decay_mask.any() else float(np.min(dvdt))
 
         # Half width: width at half of peak absolute voltage
         # Validated against Clampfit reference — exact match on all 4 test samples
@@ -158,8 +166,6 @@ def _analyze_ap(abf: pyabf.ABF) -> APFineResult | None:
             stim_step_pa=stim_step,
             voltage_threshold_mv=voltage_threshold_mv,
             spike_num=spike_count,
-            phase_plot_v=phase_v.tolist(),
-            phase_plot_dvdt=phase_dvdt.tolist(),
         )
 
     return None

@@ -11,8 +11,12 @@ def find_voltage_threshold(
     t_start: float,
     t_end: float,
     dvdt_criterion: float = DVDT_CRITERION_MV_MS,
-) -> tuple[float, float, np.ndarray, np.ndarray] | None:
-    """Find voltage threshold from dV/dt phase plot.
+) -> tuple[float, float] | None:
+    """Find voltage threshold from forward-difference dV/dt.
+
+    Forward difference: dvdt[i] = (V[i+1] - V[i]) / dt — matches Clampfit's
+    diff(). Threshold voltage is V[i+1] (the voltage at the END of the
+    interval where dV/dt first exceeds criterion).
 
     Args:
         response_data: Full sweep response signal (mV).
@@ -22,8 +26,7 @@ def find_voltage_threshold(
         dvdt_criterion: dV/dt threshold in mV/ms.
 
     Returns:
-        (voltage_threshold_mv, threshold_time_sec, phase_plot_v, phase_plot_dvdt)
-        or None if no threshold found.
+        (voltage_threshold_mv, threshold_time_sec) or None if no threshold found.
     """
     i0 = time_to_index(t_start, sample_rate)
     i1 = time_to_index(t_end, sample_rate)
@@ -33,30 +36,18 @@ def find_voltage_threshold(
         return None
 
     dt_ms = 1000.0 / sample_rate  # time step in ms
-
-    # Forward difference: dvdt[i] = (V[i+1] - V[i]) / dt
-    # Matches Clampfit's diff() function. Threshold voltage is V[i+1]
-    # (the voltage at the END of the interval where dV/dt first exceeds
-    # criterion), which is the voltage being transitioned to.
     dvdt = np.diff(segment) / dt_ms
-    v = segment[1:]  # voltage at the end of each dV/dt interval
+    v = segment[1:]
 
-    # Phase plot arrays for display: same forward diff used for threshold
-    # detection, so the criterion crossing visually lands on the trace.
-    dvdt_plot = dvdt
-    v_plot = v
-
-    # Find first point where dV/dt exceeds criterion
     threshold_indices = np.where(dvdt > dvdt_criterion)[0]
     if len(threshold_indices) == 0:
         return None
 
     idx = threshold_indices[0]
     voltage_threshold_mv = float(v[idx])
-    # v[idx] = segment[idx+1]; time at segment[idx+1]
     threshold_time_sec = t_start + (idx + 1) / sample_rate
 
-    return voltage_threshold_mv, threshold_time_sec, v_plot, dvdt_plot
+    return voltage_threshold_mv, threshold_time_sec
 
 
 def count_spikes_voltage(

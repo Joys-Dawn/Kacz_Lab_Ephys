@@ -18,10 +18,8 @@ class TestFindVoltageThreshold:
                 break
 
         assert result is not None, "No sweep in AP fine had a detectable spike"
-        vthresh, _, v, dvdt = result
+        vthresh, _ = result
         assert -60.0 < vthresh < -20.0, f"VThresh {vthresh} outside expected range"
-        assert len(v) == len(dvdt)
-        assert len(v) > 0
 
     def test_slow_ramp_below_criterion_returns_none(self):
         """20 mV/ms ramp (below 28 criterion) should not trigger threshold."""
@@ -50,7 +48,7 @@ class TestFindVoltageThreshold:
         result = find_voltage_threshold(signal, rate, 0.0, 0.01, dvdt_criterion=28.0)
 
         assert result is not None
-        vthresh, _, v, dvdt = result
+        vthresh, _ = result
         assert -65.0 < vthresh < -40.0
 
     def test_flat_signal_returns_none(self):

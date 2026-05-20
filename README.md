@@ -53,28 +53,21 @@ Click **Run Analysis**. The pipeline runs per sample in the order dictated by th
 RMP → AP fine → (VThresh QC review) → Ri/Ih → Ramp → 1s AP → 5/25/50 AHP
 ```
 
-For each sample, after RMP and AP fine are computed, a **QC review dialog** opens showing:
-- **Left**: the phase plot (dV/dt vs mV) for the first-firing sweep, with the computed voltage threshold marked as a vertical red line and the 28 mV/ms criterion as a horizontal orange line.
-- **Right**: the response trace (mV vs time) for that sweep, with the voltage threshold drawn as a horizontal red line.
-
-You can **Accept** (continue with remaining protocols), **Reject** (put this cell in a separate rejected folder and skip the rest), or **Cancel** (stop the whole batch).
-
 Samples whose RMP is more depolarized than their voltage threshold are automatically excluded (the `RMP > VThresh` cutoff) — no dialog, straight to the rejected folder.
 
 ### 4. Export Results
 
-Click **Export Results** and pick an output folder. The app writes six things:
+Click **Export Results** and pick an output folder. The app writes five things:
 
 | Output | Contents |
 |---|---|
-| `PASSED/results.xlsx` | Main workbook — one tab per protocol plus a `Fully Compiled` master tab with one row per sample. |
-| `User Rejected VThresh/results.xlsx` | Samples you rejected at the QC review dialog. |
-| `RMP gt VThresh/results.xlsx` | Samples auto-excluded by the QC cutoff. |
+| `PASSED/results.xlsx` | Main workbook for PASSED samples only — one tab per protocol plus a `Fully Compiled` master tab with one row per sample. |
+| `REJECTED/results.xlsx` | Same tab structure as PASSED, but for every rejected sample. Each row carries a `FLAG` column (`USER` for samples you rejected at the QC review dialog, `AUTO` for samples auto-excluded by the `RMP > VThresh` cutoff) and a `File Path` column so you can find the source `.abf`. |
 | `1s AP Rejected Sweeps/results.xlsx` | 1s AP sweeps that fired more than 50 spikes (zeroed in PASSED, preserved here for review). |
 | `Ri-Ih Contaminated Sweeps/results.xlsx` | Ri/Ih sweeps that had an AP in their baseline (0–0.2 s) or steady-state (1.0–1.2 s) window — excluded from the Ri regression and sag calculations, preserved here for review. |
 | `trimming_analysis.xlsx` | Flat summary: Sample #, RMP, VThresh, QC pass/fail — useful for at-a-glance cohort health checks. |
 
-The `Fully Compiled` tab includes every sample — passed and excluded. Excluded samples get an `Excluded? = Yes` flag and a `Reason` column (`RMP > VThresh` or `User Rejected VThresh`) with their metric cells left blank.
+PASSED and REJECTED are kept as separate workbooks (not intermingled) so the two cohorts can be compared side-by-side. Per-sample metrics are computed for rejected samples too — the QC gate only decides which workbook a sample lands in, not whether its numbers are calculated.
 
 ---
 

@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 
+
 # Physiological constant: dV/dt threshold for AP detection (mV/ms)
 DVDT_CRITERION_MV_MS = 28.0
 
@@ -14,6 +15,20 @@ class QCStatus(Enum):
 class AnalysisCancelled(Exception):
     """Raised when the user cancels analysis via the QC dialog."""
     pass
+
+
+@dataclass
+class QCReview:
+    """User's verdict from the QC review dialog.
+
+    accepted: True if the user clicked Accept, False if Reject.
+    override_vthresh_mv: If the user clicked a different sample on the AP
+        plot to override the auto-detected threshold, this is the new value.
+        None means "no override — keep the auto-detected value." Only meaningful
+        when accepted is True.
+    """
+    accepted: bool
+    override_vthresh_mv: float | None = None
 
 
 @dataclass
@@ -54,9 +69,6 @@ class APFineResult:
     stim_step_pa: float  # R2S1: measured stim plateau mean (top 5% of peak in AP window)
     voltage_threshold_mv: float
     spike_num: int
-    # Phase plot data for QC review (not exported, used by GUI)
-    phase_plot_v: list[float] = field(default_factory=list, repr=False)
-    phase_plot_dvdt: list[float] = field(default_factory=list, repr=False)
 
 
 @dataclass

@@ -28,9 +28,13 @@ class ScanResult:
     duplicates: dict[tuple[str, str, str], list[Path]] = field(default_factory=dict)
 
 
-# ABF filename pattern: YYYY_MM_DD_INITIALS_NNNN
+# ABF filename patterns we recognize:
+#   YYYY_MM_DD_INITIALS_NNNN  → date + experimenter
+#   YYYY_MM_DD_NNNN           → date only
+# Older animal-prefixed names (<ANIMAL>_NNNN) match neither and fall back
+# to the ABF header's recording datetime for the date.
 _ABF_NAME_RE = re.compile(
-    r"^(\d{4}_\d{2}_\d{2})_([A-Za-z]+)_(\d{4,})$"
+    r"^(\d{4}_\d{2}_\d{2})(?:_([A-Za-z]+))?_(\d{4,})$"
 )
 
 
@@ -38,15 +42,15 @@ def parse_abf_filename(name: str) -> tuple[str, str]:
     """Extract collection date and experimenter initials from ABF filename.
 
     Args:
-        name: Filename stem, e.g. "2026_02_04_JCA_0000"
+        name: Filename stem, e.g. "2026_02_04_JCA_0000" or "2025_12_10_0000"
 
     Returns:
-        (collection_date, experimenter) e.g. ("2026_02_04", "JCA").
-        Returns ("", "") if the pattern doesn't match.
+        (collection_date, experimenter). Experimenter is "" when the filename
+        has no initials block. Both are "" if the date pattern doesn't match.
     """
     m = _ABF_NAME_RE.match(name)
     if m:
-        return m.group(1), m.group(2)
+        return m.group(1), m.group(2) or ""
     return "", ""
 
 
@@ -94,11 +98,20 @@ def scan_project_folder(project_path: Path) -> ScanResult:  # noqa: C901
                     protocol = get_protocol_name(abf)
                     protocol_files[protocol].append(abf_path)
 
-                    # Extract date/experimenter from first parseable filename
+                    # Date + experimenter from the first file that yields them.
+                    # Filename gives both when present (YYYY_MM_DD_INITIALS_NNNN);
+                    # date alone when only the date prefix is present; otherwise
+                    # the ABF header's recording timestamp is a reliable date
+                    # fallback (no fallback exists for experimenter).
                     if not info.collection_date:
                         date, exp = parse_abf_filename(abf_path.stem)
+                        if not date:
+                            dt = getattr(abf, "abfDateTime", None)
+                            if dt is not None:
+                                date = dt.strftime("%Y_%m_%d")
                         if date:
                             info.collection_date = date
+                        if exp and not info.experimenter:
                             info.experimenter = exp
                 except Exception as e:
                     logger.warning("Skipping %s: %s", abf_path.name, e)

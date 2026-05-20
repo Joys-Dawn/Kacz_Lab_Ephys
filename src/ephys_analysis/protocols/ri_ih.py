@@ -31,7 +31,9 @@ def analyze_ri_ih(abf: pyabf.ABF) -> RiIhResult:
     # Nominal currents (from User List) are used to *filter* which sweeps
     # enter the Ri regression. The regression itself runs on the *measured*
     # stimulus signal — this is what Clampfit does and matches the customer's
-    # reference values exactly.
+    # reference values exactly. If the User List is shorter than sweepCount,
+    # we only analyze the first len(currents) sweeps; trailing sweeps that
+    # extend past the list are dropped (matches customer Clampfit behavior).
     currents = reconstruct_currents(abf, epoch_index=1)
 
     baselines = []
@@ -43,7 +45,7 @@ def analyze_ri_ih(abf: pyabf.ABF) -> RiIhResult:
     bl_i0, bl_i1 = time_to_index(0.0, rate), time_to_index(0.2, rate)
     ss_i0, ss_i1 = time_to_index(1.0, rate), time_to_index(1.2, rate)
 
-    for sweep_idx in range(abf.sweepCount):
+    for sweep_idx in range(len(currents)):
         response = get_sweep_data(abf, sweep_idx, channel=0)
         bl = windowed_mean(response, 0.0, 0.2, rate)
         pk = windowed_antipeak(response, 0.3, 0.5, rate)

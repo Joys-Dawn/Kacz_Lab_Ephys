@@ -32,6 +32,9 @@ def analyze_one_s_ap(
         rheobase_pa: Rheobase from Ramp (for Rheobase SU FF).
     """
     rate = get_sampling_rate(abf)
+    # If the User List is shorter than sweepCount, only the first
+    # len(currents) sweeps are analyzed; trailing sweeps without a defined
+    # nominal current are dropped.
     currents = reconstruct_currents(abf, epoch_index=1)
     step_onset = get_step_onset_sec(abf, epoch_index=1)
     step_duration = get_step_duration_sec(abf, epoch_index=1)
@@ -46,7 +49,7 @@ def analyze_one_s_ap(
     rheobase_su_ff = 0.0
     rheobase_su_found = False
 
-    for sweep_idx in range(abf.sweepCount):
+    for sweep_idx in range(len(currents)):
         response = get_sweep_data(abf, sweep_idx, channel=0)
         step_data = response[i_start:i_end]
 

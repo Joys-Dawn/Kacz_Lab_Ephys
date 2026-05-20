@@ -10,11 +10,12 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal
 
 from ephys_analysis.core.pipeline import analyze_all
-from ephys_analysis.core.types import SampleResult, QCStatus, APFineResult, AnalysisCancelled
+from ephys_analysis.core.types import (
+    SampleResult, QCStatus, APFineResult, AnalysisCancelled, QCReview,
+)
 from ephys_analysis.io.scanner import scan_project_folder, ScanResult, SampleInfo
 from ephys_analysis.io.excel_export import (
-    export_passed, export_rejected_vthresh,
-    export_rmp_gt_vthresh, export_hyperfiring_sweeps,
+    export_passed, export_rejected, export_hyperfiring_sweeps,
     export_ri_ih_contaminated_sweeps, export_trimming_analysis,
 )
 from ephys_analysis.gui.widgets.trace_viewer import TraceViewer
@@ -29,8 +30,9 @@ class AnalysisWorker(QThread):
     """Worker thread that runs the analysis pipeline off the GUI thread."""
 
     progress = Signal(int, str)
-    qc_needed = Signal(str, str, object)  # sample_id, ap_path, APFineResult
+    qc_needed = Signal(str, str, object, float)  # sample_id, ap_path, APFineResult, rmp_mv
     finished = Signal(list)
+    cancelled = Signal()
     error = Signal(str)
 
     def __init__(
@@ -42,11 +44,11 @@ class AnalysisWorker(QThread):
         self._samples = samples
         self._nominal_data = nominal_data
         self._qc_event = threading.Event()
-        self._qc_result: bool = False
+        self._qc_result: QCReview = QCReview(accepted=False)
         self._cancelled = False
 
     @property
-    def cancelled(self) -> bool:
+    def is_cancelled(self) -> bool:
         return self._cancelled
 
     def run(self):
@@ -59,24 +61,28 @@ class AnalysisWorker(QThread):
                 cancel_check=lambda: self._cancelled,
             )
             self.finished.emit(results)
+        except AnalysisCancelled:
+            self.cancelled.emit()
         except Exception as e:
             self.error.emit(str(e))
 
     def _on_progress(self, index: int, message: str):
         self.progress.emit(index, message)
 
-    def _qc_review(self, sample_id: str, ap_path: str, ap_result: APFineResult) -> bool:
+    def _qc_review(
+        self, sample_id: str, ap_path: str, ap_result: APFineResult, rmp_mv: float,
+    ) -> QCReview:
         """Called from worker thread — emits signal and blocks until main thread responds."""
         self._qc_event.clear()
-        self.qc_needed.emit(sample_id, ap_path, ap_result)
+        self.qc_needed.emit(sample_id, ap_path, ap_result, rmp_mv)
         self._qc_event.wait()
         if self._cancelled:
             raise AnalysisCancelled()
         return self._qc_result
 
-    def set_qc_result(self, accepted: bool):
+    def set_qc_result(self, review: QCReview):
         """Called from main thread to unblock the worker."""
-        self._qc_result = accepted
+        self._qc_result = review
         self._qc_event.set()
 
     def cancel(self):
@@ -246,6 +252,7 @@ class MainWindow(QMainWindow):
         self._worker.progress.connect(self._on_progress)
         self._worker.qc_needed.connect(self._on_qc_needed)
         self._worker.finished.connect(self._on_analysis_finished)
+        self._worker.cancelled.connect(self._on_analysis_cancelled)
         self._worker.error.connect(self._on_analysis_error)
         self._worker.start()
 
@@ -253,14 +260,20 @@ class MainWindow(QMainWindow):
         self.progress.setValue(index)
         self.statusbar.showMessage(message)
 
-    def _on_qc_needed(self, sample_id: str, ap_path: str, ap_result: APFineResult):
+    def _on_qc_needed(
+        self, sample_id: str, ap_path: str, ap_result: APFineResult, rmp_mv: float,
+    ):
         """Show QC review dialog on main thread, then unblock worker."""
-        dlg = QCReviewDialog(sample_id, ap_path, ap_result, self)
+        dlg = QCReviewDialog(sample_id, ap_path, ap_result, rmp_mv, self)
         dlg.exec()
         if dlg.accepted_result == "cancel":
             self._worker.cancel()
         else:
-            self._worker.set_qc_result(dlg.accepted_result is True)
+            review = QCReview(
+                accepted=dlg.accepted_result is True,
+                override_vthresh_mv=dlg.override_vthresh_mv,
+            )
+            self._worker.set_qc_result(review)
 
     def _on_analysis_finished(self, results: list[SampleResult]):
         self.results = results
@@ -275,6 +288,12 @@ class MainWindow(QMainWindow):
         self.statusbar.showMessage(
             f"Analysis complete: {passed} passed, {rejected} user rejected, {failed} RMP>VThresh"
         )
+
+    def _on_analysis_cancelled(self):
+        self.progress.setVisible(False)
+        self._set_toolbar_enabled(True)
+        self._worker = None
+        self.statusbar.showMessage("Analysis cancelled")
 
     def _on_analysis_error(self, error_msg: str):
         self.progress.setVisible(False)
@@ -293,8 +312,7 @@ class MainWindow(QMainWindow):
 
         output_path = Path(output_dir)
         export_passed(self.results, output_path)
-        export_rejected_vthresh(self.results, output_path)
-        export_rmp_gt_vthresh(self.results, output_path)
+        export_rejected(self.results, output_path)
         export_hyperfiring_sweeps(self.results, output_path)
         export_ri_ih_contaminated_sweeps(self.results, output_path)
         export_trimming_analysis(self.results, output_path)

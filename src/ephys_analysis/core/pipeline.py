@@ -8,7 +8,9 @@ from typing import Callable
 
 from ephys_analysis.core.abf_io import load_abf
 from ephys_analysis.core.qc import apply_qc_gate
-from ephys_analysis.core.types import SampleResult, QCStatus, APFineResult, AnalysisCancelled
+from ephys_analysis.core.types import (
+    SampleResult, QCStatus, APFineResult, AnalysisCancelled, QCReview,
+)
 from ephys_analysis.io.scanner import SampleInfo
 from ephys_analysis.protocols import (
     PROTO_RMP, PROTO_AP_FINE, PROTO_AP_COARSE, PROTO_RI_IH,
@@ -23,8 +25,16 @@ from ephys_analysis.protocols.ahp import analyze_ahp, AHP_5, AHP_25, AHP_50
 
 logger = logging.getLogger(__name__)
 
-# Callback type: receives (sample_id, ap_path, ap_result) → True=accept, False=reject
-QCReviewer = Callable[[str, str, APFineResult], bool]
+# Callback type: receives (sample_id, ap_path, ap_result, rmp_mv) → QCReview.
+# Tests can pass simpler callables that return a bool; the pipeline normalizes
+# both forms via _normalize_review below.
+QCReviewer = Callable[[str, str, APFineResult, float], "QCReview | bool"]
+
+
+def _normalize_review(value) -> QCReview:
+    if isinstance(value, QCReview):
+        return value
+    return QCReview(accepted=bool(value))
 
 
 def analyze_sample(  # noqa: C901
@@ -74,11 +84,26 @@ def analyze_sample(  # noqa: C901
 
         if qc_status == QCStatus.PASSED:
             if qc_reviewer:
-                accepted = qc_reviewer(info.sample_id, str(ap_path), result.ap_fine)
+                raw = qc_reviewer(
+                    info.sample_id, str(ap_path), result.ap_fine, result.rmp.rmp_mv,
+                )
+                review = _normalize_review(raw)
             else:
-                accepted = True
+                review = QCReview(accepted=True)
 
-            if accepted:
+            # Apply the user's threshold override (if any) before deciding QC.
+            # An override below RMP flips the verdict to RMP_GT_VTHRESH even if
+            # the user clicked Accept — the gate is automatic, not negotiable.
+            if review.override_vthresh_mv is not None:
+                result.ap_fine.voltage_threshold_mv = review.override_vthresh_mv
+                qc_status = apply_qc_gate(
+                    result.rmp.rmp_mv, result.ap_fine.voltage_threshold_mv,
+                )
+
+            if qc_status != QCStatus.PASSED:
+                result.qc_status = QCStatus.RMP_GT_VTHRESH
+                result.file_path = str(ap_path) if ap_path else ""
+            elif review.accepted:
                 result.qc_status = QCStatus.PASSED
             else:
                 result.qc_status = QCStatus.USER_REJECTED_VTHRESH
@@ -89,34 +114,37 @@ def analyze_sample(  # noqa: C901
             result.file_path = str(ap_path) if ap_path else ""
     elif not result.ap_fine:
         result.qc_status = QCStatus.RMP_GT_VTHRESH
+        result.file_path = str(ap_path) if ap_path else ""
 
-    # 4. If passed, continue with remaining protocols
-    if result.qc_status == QCStatus.PASSED:
-        if PROTO_RI_IH in protocols:
-            abf = load_abf(protocols[PROTO_RI_IH])
-            result.ri_ih = analyze_ri_ih(abf)
+    # 4. Remaining protocols — run for every sample, not just PASSED ones.
+    # The customer's compiled spreadsheet fills these columns for excluded
+    # samples too; QC status only gates downstream group statistics, not
+    # whether the per-sample number is computed.
+    if PROTO_RI_IH in protocols:
+        abf = load_abf(protocols[PROTO_RI_IH])
+        result.ri_ih = analyze_ri_ih(abf)
 
-        if PROTO_RAMP in protocols:
-            abf = load_abf(protocols[PROTO_RAMP])
-            result.ramp = analyze_ramp(abf)
+    if PROTO_RAMP in protocols:
+        abf = load_abf(protocols[PROTO_RAMP])
+        result.ramp = analyze_ramp(abf)
 
-        if PROTO_1S_AP in protocols:
-            abf = load_abf(protocols[PROTO_1S_AP])
-            ithresh = result.ap_fine.current_threshold_pa if result.ap_fine else 0.0
-            rheobase = result.ramp.rheobase_pa if result.ramp else 0.0
-            result.one_s_ap = analyze_one_s_ap(abf, ithresh, rheobase)
+    if PROTO_1S_AP in protocols:
+        abf = load_abf(protocols[PROTO_1S_AP])
+        ithresh = result.ap_fine.current_threshold_pa if result.ap_fine else 0.0
+        rheobase = result.ramp.rheobase_pa if result.ramp else 0.0
+        result.one_s_ap = analyze_one_s_ap(abf, ithresh, rheobase)
 
-        if PROTO_AHP_5 in protocols:
-            abf = load_abf(protocols[PROTO_AHP_5])
-            result.ahp_5 = analyze_ahp(abf, AHP_5)
+    if PROTO_AHP_5 in protocols:
+        abf = load_abf(protocols[PROTO_AHP_5])
+        result.ahp_5 = analyze_ahp(abf, AHP_5)
 
-        if PROTO_AHP_25 in protocols:
-            abf = load_abf(protocols[PROTO_AHP_25])
-            result.ahp_25 = analyze_ahp(abf, AHP_25)
+    if PROTO_AHP_25 in protocols:
+        abf = load_abf(protocols[PROTO_AHP_25])
+        result.ahp_25 = analyze_ahp(abf, AHP_25)
 
-        if PROTO_AHP_50 in protocols:
-            abf = load_abf(protocols[PROTO_AHP_50])
-            result.ahp_50 = analyze_ahp(abf, AHP_50)
+    if PROTO_AHP_50 in protocols:
+        abf = load_abf(protocols[PROTO_AHP_50])
+        result.ahp_50 = analyze_ahp(abf, AHP_50)
 
     return result
 

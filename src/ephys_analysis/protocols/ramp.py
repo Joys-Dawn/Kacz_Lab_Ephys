@@ -33,7 +33,7 @@ def analyze_ramp(abf: pyabf.ABF) -> RampResult | None:
     if result is None:
         return None
 
-    _, spike_time, _, _ = result
+    _, spike_time = result
 
     # Rheobase: peak-to-peak of the measured stimulus signal from t=0
     # to first AP threshold crossing.

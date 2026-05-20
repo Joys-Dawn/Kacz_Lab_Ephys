@@ -1,6 +1,14 @@
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+
+class MiniNavToolbar(NavigationToolbar2QT):
+    """matplotlib nav toolbar trimmed to Home + Pan + Zoom."""
+    toolitems = [
+        ti for ti in NavigationToolbar2QT.toolitems
+        if ti[0] in ("Home", "Pan", "Zoom")
+    ]
 
 
 class PlotCanvas(QWidget):

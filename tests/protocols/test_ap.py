@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 from ephys_analysis.core.abf_io import load_abf
 from ephys_analysis.protocols.ap import analyze_ap_fine, analyze_ap_coarse
@@ -72,14 +73,6 @@ class TestAnalyzeAPFine:
 
         assert 1 <= result.sweep_num <= abf.sweepCount
 
-    def test_phase_plot_data_populated(self, abf_ap_fine):
-        abf = load_abf(abf_ap_fine)
-
-        result = analyze_ap_fine(abf)
-
-        assert len(result.phase_plot_v) > 0
-        assert len(result.phase_plot_v) == len(result.phase_plot_dvdt)
-
     def test_peak_amp_matches_reference_for_sample_1666(self, abf_ap_fine):
         """Sample 1666 reference Peak Amplitude is 118.870 mV."""
         abf = load_abf(abf_ap_fine)
@@ -105,3 +98,69 @@ class TestAnalyzeAPCoarse:
 
         assert result is not None, "AP coarse should detect at least one spike"
         assert result.peak_amp_mv > 0
+
+
+class TestMaxRiseAboveZeroMask:
+    """Customer's Max Rise = max(dV/dt) restricted to samples where V[i+1] > 0.
+
+    On clean APs the unmasked max happens during the overshoot anyway, so the
+    mask has no effect (raw forward-diff already matches). On weak / noisy APs
+    a pre-overshoot dV/dt spike would otherwise be picked up; the mask
+    suppresses it and matches Clampfit's Max Slope of Rise.
+    """
+
+    def test_max_rise_matches_reference_for_sample_1666(self, abf_ap_fine):
+        """Sample 1666 reference Max Rise is 549.316 mV/ms (clean AP)."""
+        abf = load_abf(abf_ap_fine)
+
+        result = analyze_ap_fine(abf)
+
+        assert result.max_rise_slope_mv_ms == pytest.approx(549.316, abs=0.01)
+
+    def test_pre_overshoot_noise_does_not_inflate_max_rise(self, abf_ap_fine):
+        """Inject a spurious +50 mV/ms transient at V ≈ -40 mV in the AP
+        window. The transient has high dV/dt but lands well below 0 mV, so the
+        above-zero mask must exclude it and leave Max Rise unchanged.
+        """
+        abf = load_abf(abf_ap_fine)
+        rate = abf.sampleRate
+        baseline_result = analyze_ap_fine(abf)
+
+        # Two adjacent samples giving dV/dt ≈ +50 mV/ms in the pre-rise window.
+        # At 20 kHz, 50 mV/ms = 2.5 mV per sample.
+        i = int(0.298 * rate)
+        abf.data[0, i] = -42.5
+        abf.data[0, i + 1] = -40.0
+
+        result = analyze_ap_fine(abf)
+
+        assert result.max_rise_slope_mv_ms == pytest.approx(
+            baseline_result.max_rise_slope_mv_ms, abs=0.01
+        )
+
+
+class TestSubthresholdEventIsSkipped:
+    """A sweep where dV/dt crosses the 28 mV/ms criterion but voltage never
+    rises above 0 mV is not a real AP — the analyzer must skip it and keep
+    searching later sweeps. Without that guard, sub-threshold depolarizations
+    would corrupt Peak Amplitude / Half-Width.
+    """
+
+    def test_steep_subthreshold_ramp_does_not_get_reported_as_ap(self, abf_ap_fine):
+        abf = load_abf(abf_ap_fine)
+        rate = abf.sampleRate
+        baseline_result = analyze_ap_fine(abf)
+
+        # Inject a 50 mV/ms ramp into sweep 0 at the VThresh window peaking at -10 mV.
+        # dV/dt over 28 mV/ms but peak below 0 mV → analyzer must skip sweep 0.
+        i_start = int(0.296 * rate)
+        i_end = int(0.300 * rate)
+        n = i_end - i_start
+        abf.data[0, i_start:i_end] = np.linspace(-60.0, -10.0, n)
+
+        result = analyze_ap_fine(abf)
+
+        # peak_amp_mv stays positive — analyzer skipped the sub-threshold event
+        # and found the real AP at the original sweep, unchanged.
+        assert result.peak_amp_mv > 0
+        assert result.sweep_num == baseline_result.sweep_num
