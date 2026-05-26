@@ -133,6 +133,16 @@ class SampleResult:
     # For rejected recordings
     file_path: str = ""
     reject_sweep_num: int | None = None
+    # True whenever the AP metrics came from analyze_ap_coarse (either because
+    # the sample only has a coarse file, or because fine returned None and we
+    # fell back). Drives the "AP Source" column in the export.
+    ap_source_is_coarse: bool = False
+    # True only for the surprise case: AP fine file was present but its
+    # analyzer returned None and we fell back to coarse. Drives the post-
+    # analysis status-bar popup so the user can re-check the duplicate-
+    # resolver pick. Coarse-only samples (no fine recorded at all) do not
+    # set this — they are expected.
+    ap_used_coarse_fallback: bool = False
 
     def to_common_dict(self) -> dict:
         """Common prefix columns for every output row.

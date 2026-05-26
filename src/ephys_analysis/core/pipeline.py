@@ -68,15 +68,29 @@ def analyze_sample(  # noqa: C901
         result.rmp = analyze_rmp(abf)
 
     # 2. AP fine (or coarse fallback)
+    # Three possibilities: (a) fine file present and has a spike → use fine;
+    # (b) fine present but analyzer returns None → try coarse and flag the
+    # fallback so reviewers know; (c) fine missing entirely → coarse is the
+    # only option and no flag is needed.
     ap_path = None
     if PROTO_AP_FINE in protocols:
         ap_path = protocols[PROTO_AP_FINE]
         abf = load_abf(ap_path)
         result.ap_fine = analyze_ap_fine(abf)
+        if result.ap_fine is None and PROTO_AP_COARSE in protocols:
+            coarse_path = protocols[PROTO_AP_COARSE]
+            coarse_abf = load_abf(coarse_path)
+            coarse_result = analyze_ap_coarse(coarse_abf)
+            if coarse_result is not None:
+                result.ap_fine = coarse_result
+                ap_path = coarse_path
+                result.ap_source_is_coarse = True
+                result.ap_used_coarse_fallback = True
     elif PROTO_AP_COARSE in protocols:
         ap_path = protocols[PROTO_AP_COARSE]
         abf = load_abf(ap_path)
         result.ap_fine = analyze_ap_coarse(abf)
+        result.ap_source_is_coarse = True
 
     # 3. QC gate
     if result.rmp and result.ap_fine:
@@ -112,7 +126,11 @@ def analyze_sample(  # noqa: C901
         else:
             result.qc_status = QCStatus.RMP_GT_VTHRESH
             result.file_path = str(ap_path) if ap_path else ""
-    elif not result.ap_fine:
+    else:
+        # Either RMP or AP fine is missing — mark the sample as auto-rejected
+        # so it lands in the REJECTED bucket rather than defaulting to PASSED.
+        # (Default qc_status on SampleResult is PASSED, so without this branch
+        # a sample with AP but no RMP would silently pass QC.)
         result.qc_status = QCStatus.RMP_GT_VTHRESH
         result.file_path = str(ap_path) if ap_path else ""
 

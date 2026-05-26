@@ -331,6 +331,67 @@ class TestOnAnalysisFinished:
 
         assert "1 passed" in win.statusbar.currentMessage()
 
+    def test_status_message_omits_fallback_when_none(self, qtbot, passed_sample_result):
+        win = MainWindow()
+        qtbot.addWidget(win)
+
+        win._on_analysis_finished([passed_sample_result])
+
+        assert "coarse fallback" not in win.statusbar.currentMessage()
+
+    def test_status_message_includes_fallback_count(self, qtbot, monkeypatch, passed_sample_result):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        passed_sample_result.ap_used_coarse_fallback = True
+        # Suppress the modal so the test doesn't block.
+        monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: None)
+
+        win._on_analysis_finished([passed_sample_result])
+
+        assert "1 used AP coarse fallback" in win.statusbar.currentMessage()
+
+    def test_information_popup_shown_when_fallback_used(
+        self, qtbot, monkeypatch, passed_sample_result,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        passed_sample_result.ap_used_coarse_fallback = True
+        info_calls = []
+        monkeypatch.setattr(QMessageBox, "information",
+                            lambda *a, **kw: info_calls.append(a))
+
+        win._on_analysis_finished([passed_sample_result])
+
+        assert len(info_calls) == 1
+
+    def test_information_popup_lists_fallback_sample_ids(
+        self, qtbot, monkeypatch, passed_sample_result,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        passed_sample_result.ap_used_coarse_fallback = True
+        info_calls = []
+        monkeypatch.setattr(QMessageBox, "information",
+                            lambda *a, **kw: info_calls.append(a))
+
+        win._on_analysis_finished([passed_sample_result])
+
+        # QMessageBox.information(parent, title, text) — text is positional arg 2.
+        assert "1666" in info_calls[0][2]
+
+    def test_information_popup_not_shown_when_no_fallback(
+        self, qtbot, monkeypatch, passed_sample_result,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        info_calls = []
+        monkeypatch.setattr(QMessageBox, "information",
+                            lambda *a, **kw: info_calls.append(a))
+
+        win._on_analysis_finished([passed_sample_result])
+
+        assert info_calls == []
+
 
 # ---------------------------------------------------------------------------
 # AnalysisWorker
@@ -417,3 +478,51 @@ class TestAnalysisWorker:
         worker.cancel()
 
         assert worker.is_cancelled is True
+
+
+class TestProtocolSortKey:
+    """The file tree sorts protocols by their leading number so `11.` lands
+    at the end of the list, not between `1.` and `2.` under lexicographic
+    sort.
+    """
+
+    def test_protocol_11_sorts_after_9(self):
+        from ephys_analysis.gui.main_window import _protocol_sort_key
+
+        names = [
+            "1. Spontaneous EPSCs",
+            "11. 50 Spike AHP",
+            "2. Resting Membrane Potential",
+            "9. 1s AP Firing",
+        ]
+        ordered = sorted(names, key=_protocol_sort_key)
+
+        assert ordered[-1] == "11. 50 Spike AHP"
+
+    def test_letter_suffix_orders_a_before_b(self):
+        from ephys_analysis.gui.main_window import _protocol_sort_key
+
+        names = [
+            "5b. Single AP fine",
+            "5a. Single AP coarse",
+            "6. Ramp 6s",
+        ]
+        ordered = sorted(names, key=_protocol_sort_key)
+
+        assert ordered == [
+            "5a. Single AP coarse",
+            "5b. Single AP fine",
+            "6. Ramp 6s",
+        ]
+
+    def test_unprefixed_name_goes_to_end(self):
+        from ephys_analysis.gui.main_window import _protocol_sort_key
+
+        names = [
+            "Unknown Protocol",
+            "1. Spontaneous EPSCs",
+            "11. 50 Spike AHP",
+        ]
+        ordered = sorted(names, key=_protocol_sort_key)
+
+        assert ordered[-1] == "Unknown Protocol"

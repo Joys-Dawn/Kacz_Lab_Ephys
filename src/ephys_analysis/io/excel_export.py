@@ -70,10 +70,18 @@ def _rin_row(s: SampleResult) -> dict | None:
     return row
 
 
+def _ap_source(s: SampleResult) -> str:
+    """Which AP protocol the metrics came from — "coarse" whenever
+    analyze_ap_coarse produced the metrics, either because there was no fine
+    recording or because fine returned None and the pipeline fell back."""
+    return "coarse" if s.ap_source_is_coarse else "fine"
+
+
 def _current_threshold_row(s: SampleResult) -> dict | None:
     if not s.ap_fine:
         return None
     row = s.to_common_dict()
+    row["AP Source"] = _ap_source(s)
     row["Sweep"] = s.ap_fine.sweep_num
     row["R1S1 Mean"] = s.ap_fine.stim_baseline_pa
     row["R2S1 Mean"] = s.ap_fine.stim_step_pa
@@ -86,6 +94,7 @@ def _ap_properties_row(s: SampleResult) -> dict | None:
     if not s.ap_fine:
         return None
     row = s.to_common_dict()
+    row["AP Source"] = _ap_source(s)
     row["Sweep"] = s.ap_fine.sweep_num
     row["Half-Width (ms)"] = s.ap_fine.half_width_ms
     row["Max Rise (mV/ms)"] = s.ap_fine.max_rise_slope_mv_ms
@@ -145,6 +154,7 @@ def _fully_compiled_row(s: SampleResult) -> dict:
     row["100 pA Avg"] = s.ri_ih.sag_ratio_100pa if s.ri_ih else None
     row["Ri Slope"] = (s.ri_ih.input_resistance_mohm / 1000.0) if s.ri_ih else None
     row["Ri"] = s.ri_ih.input_resistance_mohm if s.ri_ih else None
+    row["AP Source"] = _ap_source(s) if s.ap_fine else None
     row["Sweep"] = s.ap_fine.sweep_num if s.ap_fine else None
     row["R1S1 Mean"] = s.ap_fine.stim_baseline_pa if s.ap_fine else None
     row["R2S1 Mean"] = s.ap_fine.stim_step_pa if s.ap_fine else None

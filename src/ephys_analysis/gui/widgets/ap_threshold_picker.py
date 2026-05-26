@@ -10,7 +10,7 @@ import numpy as np
 from PySide6.QtCore import Signal
 
 from ephys_analysis.core.types import DVDT_CRITERION_MV_MS
-from ephys_analysis.gui.widgets.plot_canvas import PlotCanvas, MiniNavToolbar
+from ephys_analysis.gui.widgets.plot_canvas import PlotCanvas
 
 
 class APThresholdPicker(PlotCanvas):
@@ -23,6 +23,9 @@ class APThresholdPicker(PlotCanvas):
     threshold_picked = Signal(int)
 
     def __init__(self, parent=None, figsize=(5, 4)):
+        # PlotCanvas now installs the Home/Pan/Zoom toolbar by default —
+        # criterion-crossing samples pile up visually and need zoom for
+        # precise picking.
         super().__init__(parent, figsize=figsize)
         self._v: np.ndarray | None = None
         self._t_ms: np.ndarray | None = None
@@ -34,11 +37,6 @@ class APThresholdPicker(PlotCanvas):
         self._auto_marker = None
         self._selected_marker = None
         self._ax_dvdt = None
-        # Home + Pan + Zoom — criterion-crossing samples pile up visually and
-        # need zoom for precise picking; Home returns to the default zoomed
-        # view from plot_ap.
-        self.toolbar = MiniNavToolbar(self.canvas, self)
-        self.layout().insertWidget(0, self.toolbar)
         self.canvas.mpl_connect("pick_event", self._on_pick)
 
     def plot_ap(

@@ -14,7 +14,7 @@ class MiniNavToolbar(NavigationToolbar2QT):
 class PlotCanvas(QWidget):
     """Base widget wrapping a matplotlib FigureCanvasQTAgg."""
 
-    def __init__(self, parent=None, figsize=(6, 4)):
+    def __init__(self, parent=None, figsize=(6, 4), show_toolbar: bool = True):
         super().__init__(parent)
         self.figure = Figure(figsize=figsize, tight_layout=True)
         self.canvas = FigureCanvasQTAgg(self.figure)
@@ -22,6 +22,11 @@ class PlotCanvas(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        if show_toolbar:
+            self.toolbar = MiniNavToolbar(self.canvas, self)
+            layout.addWidget(self.toolbar)
+        else:
+            self.toolbar = None
         layout.addWidget(self.canvas)
 
     def clear(self):

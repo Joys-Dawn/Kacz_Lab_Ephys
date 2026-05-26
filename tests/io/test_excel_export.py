@@ -380,6 +380,48 @@ class TestRejectedSweepColumnsAreNaN:
         assert pd.isna(df["FF 900pA"].iloc[0])
 
 
+class TestAPSourceColumn:
+    """The pipeline can silently fall back to AP coarse when AP fine has no
+    detectable spike. The "AP Source" column lets reviewers see which file
+    the metrics came from without opening the ABFs themselves.
+    """
+
+    def test_fine_is_default(self, tmp_path):
+        s = _make_passed_sample()
+
+        path = export_passed([s], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Compiled AP Properties")
+
+        assert df["AP Source"].iloc[0] == "fine"
+
+    def test_coarse_when_flag_is_set(self, tmp_path):
+        s = _make_passed_sample()
+        s.ap_source_is_coarse = True
+
+        path = export_passed([s], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Compiled AP Properties")
+
+        assert df["AP Source"].iloc[0] == "coarse"
+
+    def test_appears_in_current_threshold_tab(self, tmp_path):
+        s = _make_passed_sample()
+        s.ap_source_is_coarse = True
+
+        path = export_passed([s], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Current Threshold")
+
+        assert df["AP Source"].iloc[0] == "coarse"
+
+    def test_appears_in_fully_compiled_tab(self, tmp_path):
+        s = _make_passed_sample()
+        s.ap_source_is_coarse = True
+
+        path = export_passed([s], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert df["AP Source"].iloc[0] == "coarse"
+
+
 class TestExportHyperfiringSweeps:
     def test_no_rejected_sweeps_returns_none(self, tmp_path):
         result = export_hyperfiring_sweeps([_make_passed_sample()], tmp_path)

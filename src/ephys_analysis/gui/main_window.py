@@ -1,4 +1,5 @@
 import logging
+import re
 import threading
 from pathlib import Path
 
@@ -24,6 +25,22 @@ from ephys_analysis.gui.dialogs.duplicate_resolver import DuplicateResolverDialo
 from ephys_analysis.gui.dialogs.nominal_vars import NominalVarsDialog
 
 logger = logging.getLogger(__name__)
+
+
+_PROTOCOL_PREFIX_RE = re.compile(r"^(\d+)([a-z]?)\.", re.IGNORECASE)
+
+
+def _protocol_sort_key(name: str) -> tuple[int, str, str]:
+    """Sort protocols by their leading number (and optional letter), so
+    `11.` lands at the end of the list rather than between `1.` and `2.`
+    under default lexicographic sort. Letter is lowercased so `5A` and `5a`
+    cluster together.
+    """
+    m = _PROTOCOL_PREFIX_RE.match(name)
+    if m:
+        return (int(m.group(1)), m.group(2).lower(), name)
+    # No recognized prefix → sort to the end.
+    return (10**9, "", name)
 
 
 class AnalysisWorker(QThread):
@@ -214,7 +231,10 @@ class MainWindow(QMainWindow):
             for info in sorted(infos, key=lambda i: i.sample_id):
                 sample_item = QTreeWidgetItem([info.sample_id])
                 animal_item.addChild(sample_item)
-                for protocol, path in sorted(info.protocols.items()):
+                for protocol, path in sorted(
+                    info.protocols.items(),
+                    key=lambda kv: _protocol_sort_key(kv[0]),
+                ):
                     file_item = QTreeWidgetItem([path.name, protocol])
                     file_item.setData(0, Qt.UserRole, str(path))
                     sample_item.addChild(file_item)
@@ -285,9 +305,28 @@ class MainWindow(QMainWindow):
         passed = sum(1 for r in results if r.qc_status == QCStatus.PASSED)
         rejected = sum(1 for r in results if r.qc_status == QCStatus.USER_REJECTED_VTHRESH)
         failed = sum(1 for r in results if r.qc_status == QCStatus.RMP_GT_VTHRESH)
-        self.statusbar.showMessage(
-            f"Analysis complete: {passed} passed, {rejected} user rejected, {failed} RMP>VThresh"
+        fallback_samples = [r.sample_id for r in results if r.ap_used_coarse_fallback]
+        message = (
+            f"Analysis complete: {passed} passed, {rejected} user rejected, "
+            f"{failed} RMP>VThresh"
         )
+        if fallback_samples:
+            message += f", {len(fallback_samples)} used AP coarse fallback"
+        self.statusbar.showMessage(message)
+
+        # Modal popup so the user can't miss that AP fine returned no spike
+        # for one or more samples and the analyzer silently used coarse —
+        # they may want to re-check the AP duplicate-resolver selection.
+        if fallback_samples:
+            QMessageBox.information(
+                self, "AP Coarse Fallback Used",
+                "The AP fine analyzer found no spike for the following "
+                f"sample{'s' if len(fallback_samples) != 1 else ''}, so the "
+                "AP coarse file was used for AP metrics instead:\n\n"
+                + ", ".join(fallback_samples)
+                + "\n\nReview the AP files for these samples — you may want "
+                "to re-pick the AP fine duplicate."
+            )
 
     def _on_analysis_cancelled(self):
         self.progress.setVisible(False)

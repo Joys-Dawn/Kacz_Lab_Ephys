@@ -74,3 +74,79 @@ class TestPlotAbf:
 
         # max_sweeps caps at 3, so up to 3 lines drawn.
         assert 1 <= len(viewer.ax.lines) <= 3
+
+
+class TestHoverReadout:
+    """Cursor in the trace plot shows `Sweep N  x=...  y=...` in the
+    nav toolbar (via matplotlib's format_coord hook), so the legend
+    can stay off the plot even when 20 sweeps are drawn.
+    """
+
+    def test_format_coord_identifies_nearest_sweep(self, qtbot):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+        time = np.linspace(0, 1, 100)
+        # Three flat sweeps at distinct levels.
+        sweeps = [np.full(100, -70.0), np.full(100, -50.0), np.full(100, 0.0)]
+
+        viewer.plot_sweeps(time, sweeps, labels=["Sweep 0", "Sweep 1", "Sweep 2"])
+        readout = viewer.ax.format_coord(0.5, -49.0)
+
+        assert "Sweep 1" in readout
+
+    def test_format_coord_includes_x_and_y(self, qtbot):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+        time = np.linspace(0, 1, 10)
+
+        viewer.plot_sweeps(time, [np.zeros(10)], labels=["Sweep 0"])
+        readout = viewer.ax.format_coord(0.5, 0.0)
+
+        assert "0.500" in readout
+        assert "0.00" in readout
+
+    def test_format_coord_uses_default_labels_when_none_given(self, qtbot):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+        time = np.linspace(0, 1, 100)
+        sweeps = [np.full(100, -65.0), np.full(100, -30.0)]
+
+        viewer.plot_sweeps(time, sweeps)
+        readout = viewer.ax.format_coord(0.5, -30.0)
+
+        assert "Sweep 1" in readout
+
+    def test_no_legend_artist_is_drawn(self, qtbot):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+        time = np.linspace(0, 1, 10)
+
+        viewer.plot_sweeps(time, [np.zeros(10), np.ones(10)],
+                           labels=["Sweep 0", "Sweep 1"])
+
+        assert viewer.ax.get_legend() is None
+
+    def test_format_coord_drops_label_when_cursor_far_from_any_sweep(self, qtbot):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+        time = np.linspace(0, 1, 100)
+        # Sweeps at -70 and -60. Cursor at -20 is ~40 mV from the nearest
+        # — far outside the 3% threshold, so no sweep label should appear.
+        sweeps = [np.full(100, -70.0), np.full(100, -60.0)]
+
+        viewer.plot_sweeps(time, sweeps, labels=["Sweep 0", "Sweep 1"])
+        viewer.ax.set_ylim(-80, 0)
+        readout = viewer.ax.format_coord(0.5, -20.0)
+
+        assert "Sweep" not in readout
+
+    def test_format_coord_drops_label_when_cursor_outside_time_range(self, qtbot):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+        time = np.linspace(0, 1, 100)
+        sweeps = [np.full(100, -70.0)]
+
+        viewer.plot_sweeps(time, sweeps, labels=["Sweep 0"])
+        readout = viewer.ax.format_coord(2.0, -70.0)
+
+        assert "Sweep" not in readout

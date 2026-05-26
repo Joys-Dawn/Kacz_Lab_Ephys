@@ -144,6 +144,97 @@ class TestAnalyzeAll:
         assert known_good.rmp is not None
 
 
+class TestMissingProtocolQCDefaults:
+    """The default qc_status on SampleResult is PASSED — that's wrong for
+    samples missing the inputs to the gate. Without a guard, a sample with
+    AP fine but no RMP would slip into the PASSED bucket.
+    """
+
+    def test_missing_rmp_marks_sample_rejected(self, sample_1666_info):
+        from ephys_analysis.protocols import PROTO_RMP
+
+        sample_1666_info.protocols.pop(PROTO_RMP, None)
+
+        result = analyze_sample(sample_1666_info, nominal_data={})
+
+        assert result.rmp is None
+        assert result.qc_status == QCStatus.RMP_GT_VTHRESH
+
+    def test_missing_ap_marks_sample_rejected(self, sample_1666_info):
+        from ephys_analysis.protocols import PROTO_AP_FINE, PROTO_AP_COARSE
+
+        sample_1666_info.protocols.pop(PROTO_AP_FINE, None)
+        sample_1666_info.protocols.pop(PROTO_AP_COARSE, None)
+
+        result = analyze_sample(sample_1666_info, nominal_data={})
+
+        assert result.ap_fine is None
+        assert result.qc_status == QCStatus.RMP_GT_VTHRESH
+
+
+class TestAPCoarseFallback:
+    """When AP fine's analyzer returns None (no detectable spike in the
+    chosen AP fine file) and an AP coarse file is present, the pipeline
+    silently runs analyze_ap_coarse on the coarse file and sets
+    ap_used_coarse_fallback=True so the GUI / spreadsheet can surface it.
+    """
+
+    def test_flag_false_when_fine_succeeds(self, sample_1666_info):
+        result = analyze_sample(sample_1666_info, nominal_data={})
+
+        assert result.ap_fine is not None
+        assert result.ap_used_coarse_fallback is False
+        assert result.ap_source_is_coarse is False
+
+    def test_falls_back_to_coarse_when_fine_returns_none(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        monkeypatch.setattr(pipeline_mod, "analyze_ap_fine", lambda abf: None)
+
+        result = analyze_sample(sample_1666_info, nominal_data={})
+
+        assert result.ap_used_coarse_fallback is True
+        assert result.ap_source_is_coarse is True
+        assert result.ap_fine is not None
+
+    def test_no_fallback_when_coarse_file_missing(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+        from ephys_analysis.protocols import PROTO_AP_COARSE
+
+        monkeypatch.setattr(pipeline_mod, "analyze_ap_fine", lambda abf: None)
+        # Strip the coarse protocol from this sample so the fallback path
+        # has nothing to fall back to.
+        sample_1666_info.protocols.pop(PROTO_AP_COARSE, None)
+
+        result = analyze_sample(sample_1666_info, nominal_data={})
+
+        assert result.ap_fine is None
+        assert result.ap_used_coarse_fallback is False
+        assert result.ap_source_is_coarse is False
+
+    def test_coarse_only_sample_marks_source_but_not_fallback(
+        self, sample_1666_info,
+    ):
+        """A sample with no AP fine file (only AP coarse) is the expected
+        coarse-only case — ap_source_is_coarse must be True so the export
+        shows "coarse", but ap_used_coarse_fallback stays False because
+        nothing was unexpectedly fallen back from.
+        """
+        from ephys_analysis.protocols import PROTO_AP_FINE
+
+        sample_1666_info.protocols.pop(PROTO_AP_FINE, None)
+
+        result = analyze_sample(sample_1666_info, nominal_data={})
+
+        assert result.ap_fine is not None
+        assert result.ap_source_is_coarse is True
+        assert result.ap_used_coarse_fallback is False
+
+
 class TestCancelCheck:
     def test_immediate_cancel_returns_empty_list(self, scan_result):
         results = analyze_all(
