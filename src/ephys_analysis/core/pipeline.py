@@ -1,15 +1,22 @@
 """Analysis pipeline — pure business logic, no GUI dependencies.
 
-Processes samples in spec order: RMP → AP fine → QC gate → Ri/Ih → Ramp → 1s AP → AHPs.
-The QC review step is handled via a callback so the GUI can prompt the user.
+Detailed analysis reviews baseline flags before processing samples, then runs
+RMP → AP fine → QC review/gate → Ri/Ih → Ramp → 1s AP → flagged-file
+review → AHPs. Quick Analysis runs selected protocols with every QC path
+disabled. Review steps use callbacks so the business logic remains independent
+of the GUI.
 """
 import logging
+from dataclasses import replace
+from pathlib import Path
 from typing import Callable
 
 from ephys_analysis.core.abf_io import load_abf
+from ephys_analysis.core.baseline_qc import analyze_baseline_qc
 from ephys_analysis.core.qc import apply_qc_gate
 from ephys_analysis.core.types import (
     SampleResult, QCStatus, APFineResult, AnalysisCancelled, QCReview,
+    OneSAPResult, OneSAPReview, BaselineFlag, BaselineReview,
 )
 from ephys_analysis.io.scanner import SampleInfo
 from ephys_analysis.protocols import (
@@ -29,6 +36,12 @@ logger = logging.getLogger(__name__)
 # Tests can pass simpler callables that return a bool; the pipeline normalizes
 # both forms via _normalize_review below.
 QCReviewer = Callable[[str, str, APFineResult, float], "QCReview | bool"]
+OneSAPReviewer = Callable[
+    [str, dict[str, str], OneSAPResult], "OneSAPReview | bool"
+]
+BaselineReviewer = Callable[
+    [list[tuple[str, BaselineFlag]]], "BaselineReview | dict[str, bool]"
+]
 
 
 def _normalize_review(value) -> QCReview:
@@ -37,10 +50,64 @@ def _normalize_review(value) -> QCReview:
     return QCReview(accepted=bool(value))
 
 
+def _normalize_one_s_ap_review(value) -> OneSAPReview:
+    if isinstance(value, OneSAPReview):
+        return value
+    return OneSAPReview(accepted=bool(value))
+
+
+def _normalize_baseline_review(value) -> BaselineReview:
+    if isinstance(value, BaselineReview):
+        return value
+    return BaselineReview(decisions=dict(value))
+
+
+def _set_file_note(file_notes: dict[str, str], path: str, note: str) -> None:
+    cleaned = note.strip()
+    if cleaned:
+        file_notes[path] = cleaned
+    else:
+        file_notes.pop(path, None)
+
+
+def format_sample_notes(
+    info: SampleInfo, file_notes: dict[str, str]
+) -> str:
+    entries = []
+    for path in info.protocols.values():
+        note = file_notes.get(str(path), "").strip()
+        if note:
+            entries.append(f"{Path(path).name}: {note}")
+    return "\n".join(entries)
+
+
+def exclude_protocol_paths(
+    samples: dict[tuple[str, str], SampleInfo],
+    rejected_paths: set[str],
+) -> dict[tuple[str, str], SampleInfo]:
+    """Copy a sample map without user-rejected protocol recordings."""
+    if not rejected_paths:
+        return samples
+    return {
+        key: replace(
+            info,
+            protocols={
+                protocol: path
+                for protocol, path in info.protocols.items()
+                if str(path) not in rejected_paths
+            },
+        )
+        for key, info in samples.items()
+    }
+
+
 def analyze_sample(  # noqa: C901
     info: SampleInfo,
     nominal_data: dict[str, dict[str, str]],
     qc_reviewer: QCReviewer | None = None,
+    one_s_ap_reviewer: OneSAPReviewer | None = None,
+    file_notes: dict[str, str] | None = None,
+    skip_qc: bool = False,
 ) -> SampleResult:
     """Run the full analysis pipeline on a single sample.
 
@@ -48,10 +115,14 @@ def analyze_sample(  # noqa: C901
         info: Sample metadata and protocol file paths.
         nominal_data: {sample_id: {var_name: var_value}} from user-loaded Excel.
         qc_reviewer: Optional callback for QC visual review. If None, auto-accepts.
+        one_s_ap_reviewer: Optional callback for flagged 1-second AP review.
+        file_notes: Notes keyed by source ABF path.
+        skip_qc: Bypass automatic and manual QC for Quick Analysis.
 
     Returns:
         Populated SampleResult with all protocol results and QC status.
     """
+    notes_by_path = file_notes if file_notes is not None else {}
     result = SampleResult(
         sample_id=info.sample_id,
         animal_id=info.animal_id,
@@ -93,28 +164,38 @@ def analyze_sample(  # noqa: C901
         result.ap_source_is_coarse = True
 
     # 3. QC gate
-    if result.rmp and result.ap_fine:
-        qc_status = apply_qc_gate(result.rmp.rmp_mv, result.ap_fine.voltage_threshold_mv)
+    if skip_qc:
+        result.qc_status = QCStatus.PASSED
+    elif result.rmp and result.ap_fine:
+        initial_qc_status = apply_qc_gate(
+            result.rmp.rmp_mv, result.ap_fine.voltage_threshold_mv
+        )
+        qc_status = initial_qc_status
+        review = None
+        if qc_reviewer:
+            raw = qc_reviewer(
+                info.sample_id, str(ap_path), result.ap_fine, result.rmp.rmp_mv,
+            )
+            review = _normalize_review(raw)
+        elif qc_status == QCStatus.PASSED:
+            review = QCReview(accepted=True)
 
-        if qc_status == QCStatus.PASSED:
-            if qc_reviewer:
-                raw = qc_reviewer(
-                    info.sample_id, str(ap_path), result.ap_fine, result.rmp.rmp_mv,
-                )
-                review = _normalize_review(raw)
-            else:
-                review = QCReview(accepted=True)
+        if review is not None:
+            if review.notes is not None and ap_path is not None:
+                _set_file_note(notes_by_path, str(ap_path), review.notes)
 
-            # Apply the user's threshold override (if any) before deciding QC.
-            # An override below RMP flips the verdict to RMP_GT_VTHRESH even if
-            # the user clicked Accept — the gate is automatic, not negotiable.
             if review.override_vthresh_mv is not None:
                 result.ap_fine.voltage_threshold_mv = review.override_vthresh_mv
                 qc_status = apply_qc_gate(
                     result.rmp.rmp_mv, result.ap_fine.voltage_threshold_mv,
                 )
 
-            if qc_status != QCStatus.PASSED:
+            if review.override_auto_reject:
+                result.qc_status = QCStatus.PASSED
+            elif initial_qc_status != QCStatus.PASSED:
+                result.qc_status = QCStatus.RMP_GT_VTHRESH
+                result.file_path = str(ap_path) if ap_path else ""
+            elif qc_status != QCStatus.PASSED:
                 result.qc_status = QCStatus.RMP_GT_VTHRESH
                 result.file_path = str(ap_path) if ap_path else ""
             elif review.accepted:
@@ -127,10 +208,6 @@ def analyze_sample(  # noqa: C901
             result.qc_status = QCStatus.RMP_GT_VTHRESH
             result.file_path = str(ap_path) if ap_path else ""
     else:
-        # Either RMP or AP fine is missing — mark the sample as auto-rejected
-        # so it lands in the REJECTED bucket rather than defaulting to PASSED.
-        # (Default qc_status on SampleResult is PASSED, so without this branch
-        # a sample with AP but no RMP would silently pass QC.)
         result.qc_status = QCStatus.RMP_GT_VTHRESH
         result.file_path = str(ap_path) if ap_path else ""
 
@@ -152,6 +229,25 @@ def analyze_sample(  # noqa: C901
         rheobase = result.ramp.rheobase_pa if result.ramp else 0.0
         result.one_s_ap = analyze_one_s_ap(abf, ithresh, rheobase)
 
+        if (
+            result.one_s_ap.requires_review
+            and one_s_ap_reviewer
+            and not skip_qc
+        ):
+            protocol_paths = {
+                protocol: str(path) for protocol, path in protocols.items()
+            }
+            raw = one_s_ap_reviewer(
+                info.sample_id, protocol_paths, result.one_s_ap
+            )
+            review = _normalize_one_s_ap_review(raw)
+            one_s_path = str(protocols[PROTO_1S_AP])
+            if review.notes is not None:
+                _set_file_note(notes_by_path, one_s_path, review.notes)
+            if not review.accepted and result.qc_status == QCStatus.PASSED:
+                result.qc_status = QCStatus.USER_REJECTED_1S_AP
+                result.file_path = one_s_path
+
     if PROTO_AHP_5 in protocols:
         abf = load_abf(protocols[PROTO_AHP_5])
         result.ahp_5 = analyze_ahp(abf, AHP_5)
@@ -164,6 +260,7 @@ def analyze_sample(  # noqa: C901
         abf = load_abf(protocols[PROTO_AHP_50])
         result.ahp_50 = analyze_ahp(abf, AHP_50)
 
+    result.notes = format_sample_notes(info, notes_by_path)
     return result
 
 
@@ -173,6 +270,10 @@ def analyze_all(
     qc_reviewer: QCReviewer | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    one_s_ap_reviewer: OneSAPReviewer | None = None,
+    file_notes: dict[str, str] | None = None,
+    baseline_reviewer: BaselineReviewer | None = None,
+    skip_qc: bool = False,
 ) -> list[SampleResult]:
     """Run analysis on all samples with per-sample error handling.
 
@@ -182,12 +283,61 @@ def analyze_all(
         qc_reviewer: Optional QC review callback.
         progress_callback: Optional (index, message) callback for progress.
         cancel_check: Optional callable returning True if analysis should stop.
+        one_s_ap_reviewer: Optional flagged 1-second AP review callback.
+        file_notes: Notes keyed by source ABF path.
+        baseline_reviewer: Optional callback that reviews applicable baseline
+            flags and returns an Accept/Reject decision for every flagged file.
+        skip_qc: Bypass automatic and manual QC for Quick Analysis.
 
     Returns:
         List of SampleResult (one per sample, even on error).
     """
     results = []
     items = list(samples.items())
+
+    if not skip_qc and baseline_reviewer:
+        baseline_flags = []
+        for (_, sample_id), info in items:
+            for protocol, path in info.protocols.items():
+                try:
+                    flag = analyze_baseline_qc(
+                        load_abf(path),
+                        protocol=protocol,
+                        file_path=str(path),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Baseline check failed for %s (%s): %s",
+                        sample_id,
+                        path,
+                        e,
+                        exc_info=True,
+                    )
+                    continue
+                if flag is not None:
+                    baseline_flags.append((sample_id, flag))
+        if baseline_flags:
+            review = _normalize_baseline_review(
+                baseline_reviewer(baseline_flags)
+            )
+            flagged_paths = {flag.file_path for _, flag in baseline_flags}
+            missing_decisions = flagged_paths - review.decisions.keys()
+            if missing_decisions:
+                missing = ", ".join(sorted(missing_decisions))
+                raise ValueError(
+                    f"Baseline review did not decide every flagged file: {missing}"
+                )
+            rejected_paths = {
+                path
+                for path in flagged_paths
+                if not review.decisions[path]
+            }
+            if rejected_paths:
+                items = list(
+                    exclude_protocol_paths(
+                        dict(items), rejected_paths
+                    ).items()
+                )
 
     for idx, ((animal_id, sample_id), info) in enumerate(items):
         if cancel_check and cancel_check():
@@ -197,17 +347,28 @@ def analyze_all(
             progress_callback(idx, f"Analyzing sample {sample_id}...")
 
         try:
-            result = analyze_sample(info, nominal_data, qc_reviewer)
+            result = analyze_sample(
+                info,
+                nominal_data,
+                qc_reviewer=qc_reviewer,
+                one_s_ap_reviewer=one_s_ap_reviewer,
+                file_notes=file_notes,
+                skip_qc=skip_qc,
+            )
         except AnalysisCancelled:
             raise
         except Exception as e:
             logger.error("Analysis failed for sample %s: %s", sample_id, e, exc_info=True)
+            source_paths = [str(path) for path in info.protocols.values()]
             result = SampleResult(
                 sample_id=sample_id,
                 animal_id=animal_id,
                 collection_date=info.collection_date,
                 experimenter=info.experimenter,
-                qc_status=QCStatus.RMP_GT_VTHRESH,
+                qc_status=QCStatus.ANALYSIS_FAILED,
+                analysis_error=str(e),
+                file_path=source_paths[0] if len(source_paths) == 1 else "",
+                notes=format_sample_notes(info, file_notes or {}),
             )
         results.append(result)
 

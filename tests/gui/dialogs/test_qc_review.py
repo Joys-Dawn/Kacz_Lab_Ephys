@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QLabel, QPushButton
 
 from ephys_analysis.gui.dialogs.qc_review import QCReviewDialog
 
@@ -106,3 +106,77 @@ class TestQCReviewDialog:
         qtbot.mouseClick(accept_btn, Qt.LeftButton)
 
         assert dlg.accepted_result is True
+
+    def test_protocol_selector_switches_trace_without_closing(
+        self, qtbot, abf_ap_fine, abf_epsc, ap_fine_result,
+    ):
+        paths = {
+            "1. Spontaneous EPSCs": str(abf_epsc),
+            "5b. Single AP fine": str(abf_ap_fine),
+        }
+        dlg = QCReviewDialog(
+            "1666",
+            str(abf_ap_fine),
+            ap_fine_result,
+            rmp_mv=-65.0,
+            protocol_paths=paths,
+        )
+        qtbot.addWidget(dlg)
+        dlg.show()
+        qtbot.waitExposed(dlg)
+        epsc_index = dlg.protocol_selector.findData(str(abf_epsc))
+
+        dlg.protocol_selector.setCurrentIndex(epsc_index)
+
+        assert dlg.isVisible() is True
+        assert dlg.trace_viewer.ax.get_ylabel() == "pA"
+        assert "Spontaneous EPSCs" in dlg.trace_viewer.ax.get_title()
+
+    def test_initial_note_is_editable(self, qtbot, abf_ap_fine, ap_fine_result):
+        dlg = QCReviewDialog(
+            "1666",
+            str(abf_ap_fine),
+            ap_fine_result,
+            rmp_mv=-65.0,
+            initial_note="Initial note",
+        )
+        qtbot.addWidget(dlg)
+
+        dlg.notes_editor.appendPlainText("Follow-up")
+
+        assert dlg.notes == "Initial note\nFollow-up"
+
+    def test_auto_rejected_dialog_shows_automatic_verdict(
+        self, qtbot, abf_ap_fine, ap_fine_result,
+    ):
+        dlg = QCReviewDialog(
+            "1666",
+            str(abf_ap_fine),
+            ap_fine_result,
+            rmp_mv=-40.0,
+            auto_rejected=True,
+        )
+        qtbot.addWidget(dlg)
+
+        labels = [label.text() for label in dlg.findChildren(QLabel)]
+        buttons = [button.text() for button in dlg.findChildren(QPushButton)]
+        assert "Automatic QC: REJECTED - RMP>Threshold" in labels
+        assert "Override Auto-Reject" in buttons
+        assert "Keep Rejected" in buttons
+
+    def test_auto_reject_override_action_is_explicit(
+        self, qtbot, abf_ap_fine, ap_fine_result,
+    ):
+        dlg = QCReviewDialog(
+            "1666",
+            str(abf_ap_fine),
+            ap_fine_result,
+            rmp_mv=-40.0,
+            auto_rejected=True,
+        )
+        qtbot.addWidget(dlg)
+
+        dlg._accept()
+
+        assert dlg.accepted_result is True
+        assert dlg.override_auto_reject is True

@@ -1,3 +1,4 @@
+import numpy as np
 import pyabf
 
 from ephys_analysis.core.abf_io import (
@@ -17,6 +18,10 @@ from ephys_analysis.core.types import OneSAPResult, OneSAPSweep
 # Validated at 15 mV against customer reference: 62/64 per-sweep spike counts
 # match exactly across 4 samples × 16 sweeps; 2 off by one.
 SPIKE_PROMINENCE_MV = 15.0
+
+# Review rules requested for 1-second AP recordings.
+HIGH_FIRING_REVIEW_THRESHOLD = 100
+STIMULUS_BASELINE_DURATION_SEC = 0.2
 
 
 def analyze_one_s_ap(
@@ -48,6 +53,17 @@ def analyze_one_s_ap(
     first_sweep = -1
     rheobase_su_ff = 0.0
     rheobase_su_found = False
+    sudden_drop_sweeps = []
+    baseline_at_or_above_zero_sweeps = []
+    high_firing_sweeps = []
+    previous_spike_count: int | None = None
+    baseline_samples = max(
+        1,
+        min(
+            i_end - i_start,
+            time_to_index(STIMULUS_BASELINE_DURATION_SEC, rate),
+        ),
+    )
 
     for sweep_idx in range(len(currents)):
         response = get_sweep_data(abf, sweep_idx, channel=0)
@@ -58,69 +74,59 @@ def analyze_one_s_ap(
             min_prominence_mv=SPIKE_PROMINENCE_MV,
         )
 
-        # Spec rule: reject sweeps with > 50 spikes (genuinely hyper-firing
-        # cells flagged for user review). spike_count / firing_freq_hz / ISI
-        # are blanked (None / []) so the rejected sweep's columns are NaN in
-        # Excel — a zero would pull cross-cell averages toward zero, which is
-        # the bug a sentinel-NaN avoids. raw_spike_count is preserved.
-        rejected = raw_spike_count > 50
-        spike_count: int | None
-        ff: float | None
-        if rejected:
-            spike_count = None
-            ff = None
-            isi_ms = []
-        else:
-            spike_count = raw_spike_count
-            ff = (raw_spike_count / step_duration) if step_duration > 0 else 0.0
+        spike_count = raw_spike_count
+        ff = (raw_spike_count / step_duration) if step_duration > 0 else 0.0
+        stimulus_baseline_mv = float(np.mean(step_data[:baseline_samples]))
+        sudden_drop = (
+            previous_spike_count is not None
+            and previous_spike_count >= 5
+            and raw_spike_count == 1
+        )
+        flagged_high_firing = raw_spike_count >= HIGH_FIRING_REVIEW_THRESHOLD
 
         sweeps.append(OneSAPSweep(
             current_pa=currents[sweep_idx],
             spike_count=spike_count,
             firing_freq_hz=ff,
             isi_ms=isi_ms,
-            rejected=rejected,
             raw_spike_count=raw_spike_count,
+            stimulus_baseline_mv=stimulus_baseline_mv,
+            sudden_drop=sudden_drop,
+            flagged_high_firing=flagged_high_firing,
         ))
 
-        # Skip rejected sweeps in every summary metric — they have no usable
-        # FF, so they must not be eligible for First / Max / Rheobase SU.
-        if rejected:
-            # Rheobase SU FF picks the *first* sweep above rheobase. If that
-            # sweep is rejected the metric is left at 0 — walking to the next
-            # eligible sweep would silently change which sweep the metric
-            # reports. Leaves a 0 the user can spot against the rejected mark.
-            if rheobase_pa > 0 and currents[sweep_idx] > rheobase_pa:
-                rheobase_su_found = True
-            continue
+        sweep_num = sweep_idx + 1
+        if sudden_drop:
+            sudden_drop_sweeps.append(sweep_num)
+        if stimulus_baseline_mv >= 0.0:
+            baseline_at_or_above_zero_sweeps.append(sweep_num)
+        if flagged_high_firing:
+            high_firing_sweeps.append(sweep_num)
 
         if spike_count and first_sweep == -1:
             first_sweep = sweep_idx
             first_ff = ff
 
-        if ff is not None and ff > max_ff:
+        if ff > max_ff:
             max_ff = ff
 
         if rheobase_pa > 0 and currents[sweep_idx] > rheobase_pa and not rheobase_su_found:
             rheobase_su_ff = ff
             rheobase_su_found = True
 
-    # Ithresh FF: FF at the 1s AP sweep whose nominal current is closest to
-    # AP fine's Ithresh, within half a step size. AP fine's Ithresh is
-    # measured (R2S1 − R1S1), so it rarely lands exactly on a 1s AP step.
-    # None = no step is close enough — leave blank rather than reporting 0
-    # (which would falsely imply "no firing at Ithresh").
+        previous_spike_count = raw_spike_count
+
+    # Ithresh FF: FF at the first 1s AP sweep whose nominal current is at or
+    # above AP fine's measured Ithresh. None leaves the export blank when no
+    # nominal current reaches Ithresh.
     ithresh_ff: float | None = None
-    if ithresh_pa > 0 and len(currents) >= 2:
-        step_size = abs(currents[1] - currents[0])
-        tolerance = step_size / 2.0
-        diffs = [abs(c - ithresh_pa) for c in currents]
-        nearest_idx = min(range(len(currents)), key=lambda i: diffs[i])
-        # If the nearest sweep is hyper-firing-rejected its FF is None — leave
-        # ithresh_ff blank rather than walking to a different sweep, which
-        # would change which sweep the metric reports without flagging it.
-        if diffs[nearest_idx] <= tolerance and not sweeps[nearest_idx].rejected:
-            ithresh_ff = sweeps[nearest_idx].firing_freq_hz
+    if ithresh_pa > 0:
+        threshold_idx = next(
+            (i for i, current in enumerate(currents) if current >= ithresh_pa),
+            None,
+        )
+        if threshold_idx is not None:
+            ithresh_ff = sweeps[threshold_idx].firing_freq_hz
 
     return OneSAPResult(
         sweeps=sweeps,
@@ -130,4 +136,7 @@ def analyze_one_s_ap(
         ithresh_ff_hz=ithresh_ff,
         rheobase_su_ff_hz=rheobase_su_ff,
         first_sweep=first_sweep,
+        sudden_drop_sweeps=sudden_drop_sweeps,
+        baseline_at_or_above_zero_sweeps=baseline_at_or_above_zero_sweeps,
+        high_firing_sweeps=high_firing_sweeps,
     )

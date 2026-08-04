@@ -1,6 +1,9 @@
+from pathlib import Path
+
 import numpy as np
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame,
+    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
+    QPushButton, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import Qt
 
@@ -9,7 +12,6 @@ from ephys_analysis.core.abf_io import (
 )
 from ephys_analysis.core.types import APFineResult, DVDT_CRITERION_MV_MS
 from ephys_analysis.gui.widgets.ap_threshold_picker import APThresholdPicker
-from ephys_analysis.gui.widgets.plot_canvas import MiniNavToolbar
 from ephys_analysis.gui.widgets.trace_viewer import TraceViewer
 
 # VThresh detection window (must match the analyzer in protocols/ap.py).
@@ -26,8 +28,17 @@ class QCReviewDialog(QDialog):
     the override so the pipeline mutates the result and re-applies the gate.
     """
 
-    def __init__(self, sample_id: str, abf_path: str,
-                 ap_result: APFineResult, rmp_mv: float, parent=None):
+    def __init__(
+        self,
+        sample_id: str,
+        abf_path: str,
+        ap_result: APFineResult,
+        rmp_mv: float,
+        parent=None,
+        protocol_paths: dict[str, str] | None = None,
+        initial_note: str = "",
+        auto_rejected: bool = False,
+    ):
         super().__init__(parent)
         self.setWindowTitle(f"QC Review — Sample {sample_id}")
         self.setMinimumSize(1000, 560)
@@ -35,8 +46,18 @@ class QCReviewDialog(QDialog):
 
         self._rmp_mv = rmp_mv
         self._auto_vthresh_mv = ap_result.voltage_threshold_mv
+        self._ap_path = str(Path(abf_path))
+        self._auto_rejected = auto_rejected
         self.accepted_result = None  # True / False / "cancel"
         self.override_vthresh_mv: float | None = None  # set on Accept if changed
+        self.override_auto_reject = False
+
+        abf = load_abf(abf_path)
+        rate = get_sampling_rate(abf)
+        sweep_idx = ap_result.sweep_num - 1  # sweep_num is 1-indexed
+        self._ap_time = get_sweep_time(abf, sweep_idx)
+        self._ap_response = get_sweep_data(abf, sweep_idx, channel=0)
+        self._ap_ylabel = getattr(abf, "sweepUnitsY", "") or "mV"
 
         layout = QVBoxLayout(self)
 
@@ -48,30 +69,61 @@ class QCReviewDialog(QDialog):
         header.setAlignment(Qt.AlignCenter)
         layout.addWidget(header)
 
+        automatic_status = QLabel(
+            "Automatic QC: REJECTED - RMP>Threshold"
+            if auto_rejected
+            else "Automatic QC: PASSED"
+        )
+        automatic_status.setAlignment(Qt.AlignCenter)
+        automatic_status.setStyleSheet(
+            "color: #c62828; font-weight: bold;"
+            if auto_rejected
+            else "color: #2e7d32; font-weight: bold;"
+        )
+        layout.addWidget(automatic_status)
+
         # Plots side-by-side
         plot_layout = QHBoxLayout()
         self.picker = APThresholdPicker(self, figsize=(5, 4))
         plot_layout.addWidget(self.picker)
 
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        selector_layout = QHBoxLayout()
+        protocol_label = QLabel("Protocol")
+        self.protocol_selector = QComboBox()
+        protocol_label.setBuddy(self.protocol_selector)
+        selector_layout.addWidget(protocol_label)
+        available_paths = dict(protocol_paths or {})
+        if not any(
+            str(Path(path)) == self._ap_path for path in available_paths.values()
+        ):
+            available_paths["AP threshold source"] = self._ap_path
+        initial_index = 0
+        for protocol, path in available_paths.items():
+            normalized_path = str(Path(path))
+            self.protocol_selector.addItem(protocol, normalized_path)
+            if normalized_path == self._ap_path:
+                initial_index = self.protocol_selector.count() - 1
+        self.protocol_selector.setCurrentIndex(initial_index)
+        selector_layout.addWidget(self.protocol_selector, 1)
+        right_layout.addLayout(selector_layout)
+
         self.trace_viewer = TraceViewer(self, figsize=(5, 4))
-        # Matching toolbar so the canvas tops align with the picker's, and so
-        # the user can also zoom into the AP within the full-sweep view.
-        self._trace_toolbar = MiniNavToolbar(self.trace_viewer.canvas, self.trace_viewer)
-        self.trace_viewer.layout().insertWidget(0, self._trace_toolbar)
-        abf = load_abf(abf_path)
-        rate = get_sampling_rate(abf)
-        sweep_idx = ap_result.sweep_num - 1  # sweep_num is 1-indexed
-        time = get_sweep_time(abf, sweep_idx)
-        response = get_sweep_data(abf, sweep_idx, channel=0)
+        right_layout.addWidget(self.trace_viewer)
         self.trace_viewer.plot_single(
-            time, response, title="Full Sweep", ylabel="mV",
+            self._ap_time,
+            self._ap_response,
+            title=f"{Path(abf_path).name} - AP threshold source",
+            ylabel=self._ap_ylabel,
         )
         self._vthresh_line = self.trace_viewer.ax.axhline(
             ap_result.voltage_threshold_mv, color="red", linestyle="--",
             linewidth=1.0,
         )
         self.trace_viewer.refresh()
-        plot_layout.addWidget(self.trace_viewer)
+        plot_layout.addWidget(right_panel)
         layout.addLayout(plot_layout)
 
         # Build the picker's data from the same forward-diff convention used
@@ -79,7 +131,7 @@ class QCReviewDialog(QDialog):
         # sample lands at the exact index the analyzer chose.
         i0 = int(round(VTHRESH_WINDOW_START_SEC * rate))
         i1 = int(round(VTHRESH_WINDOW_END_SEC * rate))
-        segment = response[i0:i1]
+        segment = self._ap_response[i0:i1]
         dt_ms = 1000.0 / rate
         dvdt = np.diff(segment) / dt_ms
         v = segment[1:]
@@ -90,6 +142,9 @@ class QCReviewDialog(QDialog):
 
         self.picker.plot_ap(t_ms, v, dvdt, auto_idx=auto_idx, zoom_ms=5.0)
         self.picker.threshold_picked.connect(self._on_pick)
+        self.protocol_selector.currentIndexChanged.connect(
+            self._on_protocol_changed
+        )
 
         # Readout panel
         readout = QFrame()
@@ -105,15 +160,27 @@ class QCReviewDialog(QDialog):
         layout.addWidget(readout)
         self._refresh_readout()
 
+        notes_label = QLabel("Notes")
+        self.notes_editor = QPlainTextEdit()
+        notes_label.setBuddy(self.notes_editor)
+        self.notes_editor.setPlainText(initial_note)
+        self.notes_editor.setMaximumHeight(80)
+        layout.addWidget(notes_label)
+        layout.addWidget(self.notes_editor)
+
         # Buttons
         btn_layout = QHBoxLayout()
-        self._accept_btn = QPushButton("Accept")
+        self._accept_btn = QPushButton(
+            "Override Auto-Reject" if auto_rejected else "Accept"
+        )
         self._accept_btn.setStyleSheet(
             "background-color: #4CAF50; color: white; font-weight: bold; "
             "padding: 8px 24px;"
         )
         self._accept_btn.clicked.connect(self._accept)
-        reject_btn = QPushButton("Reject")
+        reject_btn = QPushButton(
+            "Keep Rejected" if auto_rejected else "Reject"
+        )
         reject_btn.setStyleSheet(
             "background-color: #f44336; color: white; font-weight: bold; "
             "padding: 8px 24px;"
@@ -158,18 +225,46 @@ class QCReviewDialog(QDialog):
         else:
             self._qc_label.setText("QC: FAIL (VThresh ≤ RMP)")
             self._qc_label.setStyleSheet("color: #c62828; font-weight: bold;")
-        # Move the horizontal VThresh line on the right-side trace.
-        self._vthresh_line.set_ydata([v, v])
-        self.trace_viewer.refresh()
+        # Move the horizontal VThresh line when the AP source is visible.
+        if self._vthresh_line is not None:
+            self._vthresh_line.set_ydata([v, v])
+            self.trace_viewer.refresh()
 
     def _on_pick(self, _idx: int):
         self._refresh_readout()
+
+    @property
+    def notes(self) -> str:
+        return self.notes_editor.toPlainText().strip()
+
+    def _on_protocol_changed(self, index: int):
+        path = self.protocol_selector.itemData(index)
+        if not path:
+            return
+        if str(Path(path)) == self._ap_path:
+            self.trace_viewer.plot_single(
+                self._ap_time,
+                self._ap_response,
+                title=f"{Path(path).name} - AP threshold source",
+                ylabel=self._ap_ylabel,
+            )
+            self._vthresh_line = self.trace_viewer.ax.axhline(
+                self._current_vthresh_mv(),
+                color="red",
+                linestyle="--",
+                linewidth=1.0,
+            )
+            self.trace_viewer.refresh()
+        else:
+            self._vthresh_line = None
+            self.trace_viewer.plot_abf(path)
 
     def _reset(self):
         self.picker.select_index(self.picker.auto_idx)
 
     def _accept(self):
         self.accepted_result = True
+        self.override_auto_reject = self._auto_rejected
         if self.picker.selected_idx != self.picker.auto_idx:
             self.override_vthresh_mv = self._current_vthresh_mv()
         self.accept()

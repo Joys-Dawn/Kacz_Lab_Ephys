@@ -5,8 +5,8 @@ from ephys_analysis.core.types import (
     RiIhContaminatedSweep,
 )
 from ephys_analysis.io.excel_export import (
-    export_passed, export_rejected,
-    export_hyperfiring_sweeps, export_trimming_analysis,
+    export_passed, export_rejected, export_fully_compiled,
+    export_trimming_analysis,
     export_ri_ih_contaminated_sweeps,
 )
 
@@ -60,6 +60,16 @@ class TestExportPassed:
 
         assert path.exists()
 
+    def test_timestamp_is_in_passed_folder_and_filename(self, tmp_path):
+        path = export_passed(
+            [_make_passed_sample()],
+            tmp_path,
+            timestamp="20260714_153000",
+        )
+
+        assert path.parent.name == "PASSED Results_20260714_153000"
+        assert path.name == "PASSED Results_20260714_153000.xlsx"
+
     def test_has_one_tab_per_protocol(self, tmp_path):
         results = [_make_passed_sample()]
 
@@ -96,6 +106,75 @@ class TestExportPassed:
         assert "Sex" in df.columns
         assert "Behavior" in df.columns
         assert "Nucleus?" in df.columns
+
+    def test_includes_notes_column(self, tmp_path):
+        sample = _make_passed_sample()
+        sample.notes = "2026_02_04_JCA_0009.abf: Reviewed firing pattern"
+
+        path = export_passed([sample], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert df["NOTES"].iloc[0] == sample.notes
+
+    def test_regular_cell_type_for_one_fine_ap_spike(self, tmp_path):
+        sample = _make_passed_sample()
+
+        path = export_passed([sample], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert df["Cell Type"].iloc[0] == "Regular"
+
+    def test_burst_cell_type_for_multiple_fine_ap_spikes(self, tmp_path):
+        sample = _make_passed_sample()
+        sample.ap_fine.spike_num = 2
+
+        path = export_passed([sample], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert df["Cell Type"].iloc[0] == "Burst"
+
+    def test_interneuron_at_100_hz_overrides_fine_ap_type(self, tmp_path):
+        sample = _make_passed_sample()
+        sample.ap_fine.spike_num = 2
+        sample.one_s_ap.max_ff_hz = 100.0
+
+        path = export_passed([sample], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert df["Cell Type"].iloc[0] == "Interneuron"
+
+    def test_below_100_hz_uses_fine_ap_type(self, tmp_path):
+        sample = _make_passed_sample()
+        sample.ap_fine.spike_num = 2
+        sample.one_s_ap.max_ff_hz = 99.999
+
+        assert sample.cell_type == "Burst"
+
+    def test_no_spikes_leaves_cell_type_blank(self):
+        sample = _make_passed_sample()
+        sample.ap_fine.spike_num = 0
+        sample.one_s_ap.max_ff_hz = 0.0
+
+        assert sample.cell_type == ""
+
+    def test_cell_type_is_in_every_standard_result_tab(self, tmp_path):
+        sample = _make_passed_sample()
+
+        path = export_passed([sample], tmp_path)
+        workbook = pd.ExcelFile(str(path))
+
+        for sheet_name in workbook.sheet_names:
+            df = pd.read_excel(str(path), sheet_name=sheet_name)
+            assert df["Cell Type"].iloc[0] == "Regular"
+
+    def test_first_sweep_is_exported_one_based(self, tmp_path):
+        sample = _make_passed_sample()
+        assert sample.one_s_ap.first_sweep == 1
+
+        path = export_passed([sample], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="1s Firing")
+
+        assert df["First Sweep"].iloc[0] == 2
 
     def test_excludes_rejected_samples(self, tmp_path):
         """Per customer: PASSED composite contains only PASSED samples, not
@@ -167,7 +246,15 @@ class TestExportRejected:
 
         assert path is not None
         assert path.exists()
-        assert path.parent.name == "REJECTED"
+        assert path.parent.name.startswith("REJECTED Results_")
+
+    def test_folder_and_file_include_same_timestamp(self, tmp_path):
+        s = _make_rejected_sample()
+
+        path = export_rejected([s], tmp_path, timestamp="20260714_153000")
+
+        assert path.parent.name == "REJECTED Results_20260714_153000"
+        assert path.name == "REJECTED Results_20260714_153000.xlsx"
 
     def test_has_same_tab_structure_as_passed(self, tmp_path):
         rejected = _make_rejected_sample()
@@ -198,6 +285,14 @@ class TestExportRejected:
 
         assert df["FLAG"].iloc[0] == "USER"
 
+    def test_one_s_ap_rejected_sample_flagged_user(self, tmp_path):
+        s = _make_rejected_sample(qc_status=QCStatus.USER_REJECTED_1S_AP)
+
+        path = export_rejected([s], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert df["FLAG"].iloc[0] == "USER"
+
     def test_rmp_gt_vthresh_sample_flagged_auto(self, tmp_path):
         s = _make_rejected_sample(qc_status=QCStatus.RMP_GT_VTHRESH)
 
@@ -205,6 +300,21 @@ class TestExportRejected:
         df = pd.read_excel(str(path), sheet_name="Fully Compiled")
 
         assert df["FLAG"].iloc[0] == "AUTO"
+
+    def test_analysis_failure_is_labeled_with_error(self, tmp_path):
+        s = SampleResult(
+            sample_id="1669",
+            animal_id="64280",
+            qc_status=QCStatus.ANALYSIS_FAILED,
+            file_path="path/to/unreadable.abf",
+            analysis_error="cannot parse selected file",
+        )
+
+        path = export_rejected([s], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert df["FLAG"].iloc[0] == "FAILED TO ANALYZE"
+        assert df["Analysis Error"].iloc[0] == "cannot parse selected file"
 
     def test_row_includes_file_path(self, tmp_path):
         s = _make_rejected_sample(file_path="path/to/bad.abf")
@@ -278,6 +388,52 @@ class TestExportRejected:
         assert fc["FLAG"].iloc[0] == "AUTO"
 
 
+class TestExportFullyCompiled:
+    def test_merges_passed_and_rejected_samples_in_sample_order(self, tmp_path):
+        passed = _make_passed_sample(sample_id="2000")
+        rejected = _make_rejected_sample(sample_id="1000")
+
+        path = export_fully_compiled(
+            [passed, rejected], tmp_path, timestamp="20260714_153000"
+        )
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert [str(value) for value in df["Sample #"]] == ["1000", "2000"]
+
+    def test_merged_workbook_preserves_reject_flags(self, tmp_path):
+        passed = _make_passed_sample(sample_id="1000")
+        rejected = _make_rejected_sample(sample_id="2000")
+
+        path = export_fully_compiled([passed, rejected], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        flags = dict(zip([str(value) for value in df["Sample #"]], df["FLAG"]))
+        assert pd.isna(flags["1000"])
+        assert flags["2000"] == "USER"
+
+    def test_sample_numbers_are_sorted_numerically(self, tmp_path):
+        sample_10 = _make_passed_sample(sample_id="10")
+        sample_2 = _make_passed_sample(sample_id="2")
+
+        path = export_fully_compiled([sample_10, sample_2], tmp_path)
+        df = pd.read_excel(str(path), sheet_name="Fully Compiled")
+
+        assert [str(value) for value in df["Sample #"]] == ["2", "10"]
+
+    def test_uses_timestamped_folder_and_filename(self, tmp_path):
+        path = export_fully_compiled(
+            [_make_passed_sample()],
+            tmp_path,
+            timestamp="20260714_153000",
+        )
+
+        assert path.parent.name == "FULLY COMPILED Results_20260714_153000"
+        assert path.name == "FULLY COMPILED Results_20260714_153000.xlsx"
+
+    def test_returns_none_for_no_results(self, tmp_path):
+        assert export_fully_compiled([], tmp_path) is None
+
+
 class TestExportRiIhContaminatedSweeps:
     def test_returns_none_when_no_contamination(self, tmp_path):
         result = export_ri_ih_contaminated_sweeps([_make_passed_sample()], tmp_path)
@@ -330,54 +486,58 @@ class TestExportRiIhContaminatedSweeps:
         assert len(df) == 2
 
 
-class TestRejectedSweepColumnsAreNaN:
-    """A hyper-firing-rejected sweep's per-sweep columns (FF / ISI) must
-    appear as NaN in the main exports — not zero. A zero is treated as a
-    real value by cross-cell averages and silently pulls them toward zero,
-    which is the exact bug the rejection mechanism is supposed to prevent.
-    """
-
-    def test_per_sweep_ff_is_nan(self, tmp_path):
-        s = _make_passed_sample()
-        s.one_s_ap.sweeps.append(
+class TestFlaggedSweepValuesArePreserved:
+    def test_per_sweep_ff_remains_numeric(self, tmp_path):
+        sample = _make_passed_sample()
+        sample.one_s_ap.sweeps.append(
             OneSAPSweep(
-                current_pa=900.0, spike_count=None, firing_freq_hz=None,
-                rejected=True, raw_spike_count=312,
+                current_pa=900.0,
+                spike_count=120,
+                firing_freq_hz=120.0,
+                flagged_high_firing=True,
+                raw_spike_count=120,
             )
         )
 
-        path = export_passed([s], tmp_path)
+        path = export_passed([sample], tmp_path)
         df = pd.read_excel(str(path), sheet_name="1s Firing")
 
-        assert pd.isna(df["FF 900pA"].iloc[0])
+        assert df["FF 900pA"].iloc[0] == 120.0
 
-    def test_per_sweep_isi_is_nan(self, tmp_path):
-        s = _make_passed_sample()
-        s.one_s_ap.sweeps.append(
+    def test_per_sweep_isi_remains_numeric(self, tmp_path):
+        sample = _make_passed_sample()
+        sample.one_s_ap.sweeps.append(
             OneSAPSweep(
-                current_pa=900.0, spike_count=None, firing_freq_hz=None,
-                rejected=True, raw_spike_count=312, isi_ms=[],
+                current_pa=900.0,
+                spike_count=120,
+                firing_freq_hz=120.0,
+                isi_ms=[8.0, 10.0],
+                flagged_high_firing=True,
+                raw_spike_count=120,
             )
         )
 
-        path = export_passed([s], tmp_path)
+        path = export_passed([sample], tmp_path)
         df = pd.read_excel(str(path), sheet_name="1s Firing")
 
-        assert pd.isna(df["ISI 900pA"].iloc[0])
+        assert df["ISI 900pA"].iloc[0] == 9.0
 
-    def test_fully_compiled_per_sweep_ff_is_nan(self, tmp_path):
-        s = _make_passed_sample()
-        s.one_s_ap.sweeps.append(
+    def test_fully_compiled_per_sweep_ff_remains_numeric(self, tmp_path):
+        sample = _make_passed_sample()
+        sample.one_s_ap.sweeps.append(
             OneSAPSweep(
-                current_pa=900.0, spike_count=None, firing_freq_hz=None,
-                rejected=True, raw_spike_count=312,
+                current_pa=900.0,
+                spike_count=120,
+                firing_freq_hz=120.0,
+                flagged_high_firing=True,
+                raw_spike_count=120,
             )
         )
 
-        path = export_passed([s], tmp_path)
+        path = export_passed([sample], tmp_path)
         df = pd.read_excel(str(path), sheet_name="Fully Compiled")
 
-        assert pd.isna(df["FF 900pA"].iloc[0])
+        assert df["FF 900pA"].iloc[0] == 120.0
 
 
 class TestAPSourceColumn:
@@ -420,30 +580,6 @@ class TestAPSourceColumn:
         df = pd.read_excel(str(path), sheet_name="Fully Compiled")
 
         assert df["AP Source"].iloc[0] == "coarse"
-
-
-class TestExportHyperfiringSweeps:
-    def test_no_rejected_sweeps_returns_none(self, tmp_path):
-        result = export_hyperfiring_sweeps([_make_passed_sample()], tmp_path)
-
-        assert result is None
-
-    def test_rejected_sweep_exported(self, tmp_path):
-        s = _make_passed_sample()
-        s.one_s_ap.sweeps.append(
-            OneSAPSweep(
-                current_pa=750.0, spike_count=None, firing_freq_hz=None,
-                rejected=True, raw_spike_count=312,
-            )
-        )
-
-        path = export_hyperfiring_sweeps([s], tmp_path)
-        df = pd.read_excel(str(path))
-
-        assert path.exists()
-        assert len(df) == 1
-        assert df["Raw Spike Count"].iloc[0] == 312
-        assert df["Current (pA)"].iloc[0] == 750.0
 
 
 class TestExportTrimmingAnalysis:

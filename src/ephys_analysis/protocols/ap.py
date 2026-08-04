@@ -29,6 +29,19 @@ VTHRESH_WINDOW_END = 0.3015
 BASELINE_START = 0.0
 BASELINE_END = 0.2
 
+# Current Threshold stimulus cursor (seconds)
+ITHRESH_STIM_START = 0.29695
+ITHRESH_STIM_END = 0.29885
+
+
+def _inclusive_window_mean(
+    data: np.ndarray, start_sec: float, end_sec: float, sampling_rate: float
+) -> float:
+    """Return the mean between cursor endpoints, including both endpoints."""
+    i0 = time_to_index(start_sec, sampling_rate)
+    i1 = time_to_index(end_sec, sampling_rate)
+    return float(np.mean(data[i0:i1 + 1]))
+
 
 def _interpolated_half_width(
     segment: np.ndarray, half_level: float, dt_ms: float
@@ -69,14 +82,6 @@ def _interpolated_half_width(
         return None
 
     return (fall_idx - rise_idx) * dt_ms
-
-
-# Current threshold plateau detection: mean of stimulus samples within the AP
-# window that are ≥ this fraction of the peak. Matches Clampfit's manual-cursor
-# "mean over the flat top of the pulse" convention to 4 decimal places on all
-# validated samples. The plateau is sharply defined, so 0.95–0.99 all give the
-# same answer on real data.
-PLATEAU_THRESHOLD_FRACTION = 0.95
 
 
 def _analyze_ap(abf: pyabf.ABF) -> APFineResult | None:
@@ -143,16 +148,15 @@ def _analyze_ap(abf: pyabf.ABF) -> APFineResult | None:
         # Spike count at threshold sweep — count voltage peaks above 0 mV
         spike_count, _, _ = count_spikes_voltage(ap_segment, rate, threshold_mv=0.0)
 
-        # Current Threshold (Ithresh) — measured stimulus: plateau mean minus
-        # baseline mean (Clampfit R2S1 − R1S1 convention). Nominal epoch values
-        # are off by 5–20 pA vs customer reference because pClamp's realised
-        # pulse differs slightly from the commanded amplitude.
+        # Current Threshold (Ithresh) — measured stimulus means from the
+        # protocol's inclusive R1 and R2 cursor windows (R2S1 − R1S1).
         stim = get_sweep_data(abf, sweep_idx, channel=1)
-        stim_baseline = windowed_mean(stim, BASELINE_START, BASELINE_END, rate)
-        stim_ap = stim[i0:i1]
-        stim_peak = float(np.max(stim_ap))
-        plateau_mask = stim_ap >= PLATEAU_THRESHOLD_FRACTION * stim_peak
-        stim_step = float(np.mean(stim_ap[plateau_mask]))
+        stim_baseline = _inclusive_window_mean(
+            stim, BASELINE_START, BASELINE_END, rate
+        )
+        stim_step = _inclusive_window_mean(
+            stim, ITHRESH_STIM_START, ITHRESH_STIM_END, rate
+        )
         current_threshold = stim_step - stim_baseline
 
         return APFineResult(

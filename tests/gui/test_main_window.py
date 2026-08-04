@@ -5,9 +5,15 @@ analysis pipeline) are monkeypatched at their import site in
 `ephys_analysis.gui.main_window` so no real ABFs, displays, or modals are
 needed.
 """
+from pathlib import Path
+from types import SimpleNamespace
+
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-from ephys_analysis.core.types import AnalysisCancelled, APFineResult
+from ephys_analysis.core.types import (
+    AnalysisCancelled, APFineResult, OneSAPResult, OneSAPReview,
+    BaselineFlag, BaselineReview, SampleResult, QCStatus,
+)
 from ephys_analysis.gui import main_window as mw_module
 from ephys_analysis.gui.main_window import AnalysisWorker, MainWindow
 from ephys_analysis.io.scanner import SampleInfo
@@ -241,6 +247,167 @@ class TestRunAnalysis:
         win._worker.wait(2000)
 
 
+class TestQCReviewSlot:
+    def test_auto_reject_flag_and_override_are_forwarded(
+        self, qtbot, monkeypatch,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        captured = {}
+
+        class FakeDialog:
+            def __init__(self, *args, **kwargs):
+                captured["auto_rejected"] = kwargs["auto_rejected"]
+                self.notes = "Reviewed"
+                self.accepted_result = True
+                self.override_vthresh_mv = None
+                self.override_auto_reject = True
+
+            def exec(self):
+                return 1
+
+        worker = SimpleNamespace(
+            set_qc_result=lambda review: captured.update(review=review),
+            cancel=lambda: captured.update(cancelled=True),
+        )
+        win._worker = worker
+        monkeypatch.setattr(mw_module, "QCReviewDialog", FakeDialog)
+
+        win._on_qc_needed(
+            "1542",
+            "C:/data/ap.abf",
+            _make_ap_result(vthresh=-45.0),
+            -40.0,
+            {},
+        )
+
+        assert captured["auto_rejected"] is True
+        assert captured["review"].override_auto_reject is True
+
+
+class TestQuickAnalysis:
+    def test_warns_when_no_files_are_selected(
+        self, qtbot, monkeypatch, fake_scan_result,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        win.scan_result = fake_scan_result
+        win._populate_tree()
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            lambda *args, **kwargs: warnings.append(args),
+        )
+
+        win._run_quick_analysis()
+
+        assert warnings[0][1] == "No Files Selected"
+
+    def test_runs_only_selected_analyzable_file_without_qc(
+        self, qtbot, monkeypatch, fake_scan_result,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        win.scan_result = fake_scan_result
+        win._populate_tree()
+        first_file = win.tree.topLevelItem(0).child(0).child(0)
+        first_file.setSelected(True)
+        captured = {}
+
+        def start(samples, *, skip_qc):
+            captured["samples"] = samples
+            captured["skip_qc"] = skip_qc
+
+        monkeypatch.setattr(win, "_start_analysis", start)
+
+        win._run_quick_analysis()
+
+        assert captured["skip_qc"] is True
+        assert list(captured["samples"]) == [("animalA", "1666")]
+        selected_info = captured["samples"][("animalA", "1666")]
+        assert list(selected_info.protocols) == [
+            "2. Resting Membrane Potential"
+        ]
+
+    def test_completion_prompt_exports_when_accepted(
+        self, qtbot, monkeypatch, passed_sample_result,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        win._analysis_is_quick = True
+        exported = []
+        monkeypatch.setattr(
+            win, "_confirm_quick_analysis_export", lambda: True,
+        )
+        monkeypatch.setattr(win, "_export_results", lambda: exported.append(True))
+
+        win._on_analysis_finished([passed_sample_result])
+
+        assert exported == [True]
+
+    def test_completion_prompt_can_defer_export(
+        self, qtbot, monkeypatch, passed_sample_result,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        win._analysis_is_quick = True
+        exported = []
+        monkeypatch.setattr(
+            win, "_confirm_quick_analysis_export", lambda: False,
+        )
+        monkeypatch.setattr(win, "_export_results", lambda: exported.append(True))
+
+        win._on_analysis_finished([passed_sample_result])
+
+        assert exported == []
+
+    def test_completion_prompt_has_clear_export_and_later_actions(
+        self, qtbot, monkeypatch,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        captured = {}
+
+        def inspect_and_defer(prompt):
+            captured["title"] = prompt.windowTitle()
+            captured["text"] = prompt.text()
+            captured["details"] = prompt.informativeText()
+            captured["buttons"] = [button.text() for button in prompt.buttons()]
+            next(
+                button for button in prompt.buttons()
+                if button.text() == "Later"
+            ).click()
+            return 0
+
+        monkeypatch.setattr(QMessageBox, "exec", inspect_and_defer)
+
+        assert win._confirm_quick_analysis_export() is False
+        assert captured == {
+            "title": "Quick Analysis Complete",
+            "text": "Quick analysis is complete.",
+            "details": "Export results now?",
+            "buttons": ["Export Results", "Later"],
+        }
+
+    def test_completion_prompt_accepts_export_action(
+        self, qtbot, monkeypatch,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+
+        def choose_export(prompt):
+            next(
+                button for button in prompt.buttons()
+                if button.text() == "Export Results"
+            ).click()
+            return 0
+
+        monkeypatch.setattr(QMessageBox, "exec", choose_export)
+
+        assert win._confirm_quick_analysis_export() is True
+
+
 # ---------------------------------------------------------------------------
 # Export Results
 # ---------------------------------------------------------------------------
@@ -270,7 +437,8 @@ class TestExportResults:
         called = []
         for fn in [
             "export_passed", "export_rejected",
-            "export_hyperfiring_sweeps", "export_ri_ih_contaminated_sweeps",
+            "export_fully_compiled",
+            "export_ri_ih_contaminated_sweeps",
             "export_trimming_analysis",
         ]:
             monkeypatch.setattr(mw_module, fn,
@@ -280,7 +448,8 @@ class TestExportResults:
 
         assert set(called) == {
             "export_passed", "export_rejected",
-            "export_hyperfiring_sweeps", "export_ri_ih_contaminated_sweeps",
+            "export_fully_compiled",
+            "export_ri_ih_contaminated_sweeps",
             "export_trimming_analysis",
         }
 
@@ -297,6 +466,86 @@ class TestExportResults:
         win._export_results()
 
         assert called == []
+
+    def test_all_exports_receive_one_shared_timestamp(
+        self, qtbot, monkeypatch, tmp_path, passed_sample_result,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        win.results = [passed_sample_result]
+        monkeypatch.setattr(
+            QFileDialog, "getExistingDirectory", lambda *a, **kw: str(tmp_path)
+        )
+        monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            mw_module, "create_export_timestamp", lambda: "20260714_153000"
+        )
+        timestamps = []
+        for fn in [
+            "export_passed", "export_rejected", "export_fully_compiled",
+            "export_ri_ih_contaminated_sweeps",
+            "export_trimming_analysis",
+        ]:
+            monkeypatch.setattr(
+                mw_module,
+                fn,
+                lambda results, output, timestamp: timestamps.append(timestamp),
+            )
+
+        win._export_results()
+
+        assert timestamps == ["20260714_153000"] * 5
+
+    def test_notes_edited_after_analysis_are_refreshed_before_export(
+        self, qtbot, monkeypatch, tmp_path, fake_scan_result, passed_sample_result,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        win.scan_result = fake_scan_result
+        win.results = [passed_sample_result]
+        rmp_path = str(
+            fake_scan_result.samples[("animalA", "1666")].protocols[
+                "2. Resting Membrane Potential"
+            ]
+        )
+        win.file_notes[rmp_path] = "Added after analysis"
+        monkeypatch.setattr(
+            QFileDialog, "getExistingDirectory", lambda *a, **kw: str(tmp_path)
+        )
+        monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: None)
+        for fn in [
+            "export_passed", "export_rejected", "export_fully_compiled",
+            "export_ri_ih_contaminated_sweeps",
+            "export_trimming_analysis",
+        ]:
+            monkeypatch.setattr(mw_module, fn, lambda *a, **kw: None)
+
+        win._export_results()
+
+        assert "Added after analysis" in passed_sample_result.notes
+
+
+class TestFileNotes:
+    def test_editing_selected_file_stores_note(self, qtbot):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        win._active_note_path = "C:/data/sample.abf"
+        win.notes_editor.setEnabled(True)
+
+        win.notes_editor.setPlainText("Inspect this trace")
+
+        assert win.file_notes["C:/data/sample.abf"] == "Inspect this trace"
+
+    def test_clearing_note_removes_it(self, qtbot):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        win._active_note_path = "C:/data/sample.abf"
+        win.file_notes["C:/data/sample.abf"] = "Old note"
+        win.notes_editor.setEnabled(True)
+
+        win.notes_editor.clear()
+
+        assert "C:/data/sample.abf" not in win.file_notes
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +641,36 @@ class TestOnAnalysisFinished:
 
         assert info_calls == []
 
+    def test_quick_analysis_reports_processing_failure(
+        self, qtbot, monkeypatch,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        win._analysis_is_quick = True
+        monkeypatch.setattr(
+            win, "_confirm_quick_analysis_export", lambda: False,
+        )
+        failed = SampleResult(
+            sample_id="1669",
+            animal_id="64280",
+            qc_status=QCStatus.ANALYSIS_FAILED,
+            file_path="C:/data/unreadable.abf",
+            analysis_error="cannot parse selected file",
+        )
+        warning_calls = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            lambda *args, **kwargs: warning_calls.append(args),
+        )
+
+        win._on_analysis_finished([failed])
+
+        assert "1 failed to analyze" in win.statusbar.currentMessage()
+        assert warning_calls[0][1] == "Failed to Analyze"
+        assert "unreadable.abf" in warning_calls[0][2]
+        assert "cannot parse selected file" in warning_calls[0][2]
+
 
 # ---------------------------------------------------------------------------
 # AnalysisWorker
@@ -478,6 +757,191 @@ class TestAnalysisWorker:
         worker.cancel()
 
         assert worker.is_cancelled is True
+
+    def test_one_s_ap_review_callback_returns_main_thread_verdict(
+        self, qtbot, monkeypatch, passed_sample_result,
+    ):
+        captured = {}
+
+        def fake_analyze_all(
+            samples, nominal, one_s_ap_reviewer, **kwargs
+        ):
+            captured["review"] = one_s_ap_reviewer(
+                "1666", {}, OneSAPResult(high_firing_sweeps=[11])
+            )
+            return [passed_sample_result]
+
+        monkeypatch.setattr(mw_module, "analyze_all", fake_analyze_all)
+        worker = AnalysisWorker(self._samples(), {})
+        worker.one_s_ap_review_needed.connect(
+            lambda sid, paths, result: worker.set_one_s_ap_result(
+                OneSAPReview(accepted=True)
+            )
+        )
+
+        with qtbot.waitSignal(worker.finished, timeout=2000):
+            worker.start()
+
+        assert captured["review"].accepted is True
+
+    def test_quick_worker_disables_every_qc_callback(
+        self, qtbot, monkeypatch, passed_sample_result,
+    ):
+        captured = {}
+
+        def fake_analyze_all(samples, nominal, **kwargs):
+            captured.update(kwargs)
+            return [passed_sample_result]
+
+        monkeypatch.setattr(mw_module, "analyze_all", fake_analyze_all)
+        worker = AnalysisWorker(self._samples(), {}, skip_qc=True)
+
+        with qtbot.waitSignal(worker.finished, timeout=2000):
+            worker.start()
+
+        assert captured["skip_qc"] is True
+        assert captured["qc_reviewer"] is None
+        assert captured["one_s_ap_reviewer"] is None
+        assert captured["baseline_reviewer"] is None
+
+    def test_baseline_review_waits_for_main_thread_decisions(
+        self, qtbot, monkeypatch, passed_sample_result,
+    ):
+        captured = {}
+        flag = BaselineFlag(
+            protocol="2. Resting Membrane Potential",
+            file_path="C:/data/rmp.abf",
+            target_mv=-67.0,
+            baseline_means_mv=[-50.0],
+            out_of_range_sweeps=[1],
+        )
+
+        def fake_analyze_all(samples, nominal, baseline_reviewer, **kwargs):
+            captured["review"] = baseline_reviewer([("1666", flag)])
+            return [passed_sample_result]
+
+        monkeypatch.setattr(mw_module, "analyze_all", fake_analyze_all)
+        worker = AnalysisWorker(self._samples(), {})
+        worker.baseline_flags_found.connect(
+            lambda flags: worker.set_baseline_result(
+                BaselineReview(decisions={flag.file_path: False})
+            )
+        )
+
+        with qtbot.waitSignal(worker.finished, timeout=2000):
+            worker.start()
+
+        assert captured["review"].decisions == {flag.file_path: False}
+
+    def test_baseline_rejection_is_removed_from_later_protocol_previews(
+        self, qtbot,
+    ):
+        ap_path = Path("C:/data/ap.abf")
+        ri_path = Path("C:/data/ri.abf")
+        worker = AnalysisWorker(
+            {
+                ("animalA", "1666"): SampleInfo(
+                    animal_id="animalA",
+                    sample_id="1666",
+                    protocols={"5b. AP fine": ap_path, "4. Ri": ri_path},
+                )
+            },
+            {},
+        )
+
+        worker.set_baseline_result(BaselineReview(
+            decisions={str(ri_path): False}
+        ))
+
+        assert worker._protocol_paths_for(str(ap_path)) == {
+            "5b. AP fine": str(ap_path)
+        }
+
+    def test_baseline_dialog_returns_decisions_to_worker(
+        self, qtbot, monkeypatch,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        reviews = []
+        win._worker = SimpleNamespace(
+            set_baseline_result=lambda review: reviews.append(review),
+            cancel=lambda: None,
+        )
+        rejected_path = Path("C:/data/rmp.abf")
+        accepted_path = Path("C:/data/accepted.abf")
+        win._analysis_samples = {
+            ("animalA", "1666"): SampleInfo(
+                animal_id="animalA",
+                sample_id="1666",
+                protocols={
+                    "2. Resting Membrane Potential": rejected_path,
+                    "4. Ih and Input Resistance": accepted_path,
+                },
+            )
+        }
+        captured = {}
+
+        class FakeDialog:
+            def __init__(self, flags, parent):
+                captured["flags"] = flags
+                captured["parent"] = parent
+                self.decisions = {flags[0][1].file_path: False}
+
+            def exec(self):
+                captured["shown"] = True
+                return 1
+
+        monkeypatch.setattr(mw_module, "BaselineReviewDialog", FakeDialog)
+        flag = BaselineFlag(
+            protocol="2. Resting Membrane Potential",
+            file_path=str(rejected_path),
+            target_mv=-67.0,
+            baseline_means_mv=[-50.0, -67.0, -62.0, -67.0],
+            out_of_range_sweeps=[1],
+            changed_sweep_pairs=[(1, 2), (2, 3), (3, 4)],
+        )
+
+        win._on_baseline_flags_found([("1666", flag)])
+
+        assert captured["flags"] == [("1666", flag)]
+        assert captured["parent"] is win
+        assert captured["shown"] is True
+        assert reviews[0].decisions == {flag.file_path: False}
+        assert win._analysis_samples[("animalA", "1666")].protocols == {
+            "4. Ih and Input Resistance": accepted_path
+        }
+
+    def test_closing_baseline_dialog_cancels_analysis(
+        self, qtbot, monkeypatch,
+    ):
+        win = MainWindow()
+        qtbot.addWidget(win)
+        cancelled = []
+        win._worker = SimpleNamespace(
+            set_baseline_result=lambda review: None,
+            cancel=lambda: cancelled.append(True),
+        )
+
+        class FakeDialog:
+            decisions = {}
+
+            def __init__(self, flags, parent):
+                pass
+
+            def exec(self):
+                return 0
+
+        monkeypatch.setattr(mw_module, "BaselineReviewDialog", FakeDialog)
+        flag = BaselineFlag(
+            protocol="4. Ih and Input Resistance",
+            file_path="C:/data/ri.abf",
+            target_mv=-67.0,
+            out_of_range_sweeps=[1],
+        )
+
+        win._on_baseline_flags_found([("1666", flag)])
+
+        assert cancelled == [True]
 
 
 class TestProtocolSortKey:

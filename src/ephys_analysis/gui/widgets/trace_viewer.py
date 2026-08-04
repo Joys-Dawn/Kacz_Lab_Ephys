@@ -19,11 +19,13 @@ class TraceViewer(PlotCanvas):
         time = get_sweep_time(abf)
         n = abf.sweepCount if max_sweeps is None else min(abf.sweepCount, max_sweeps)
         sweeps = [get_sweep_data(abf, i, channel=0) for i in range(n)]
-        labels = [f"Sweep {i}" for i in range(len(sweeps))]
+        labels = [f"Sweep {i + 1}" for i in range(len(sweeps))]
         protocol = get_protocol_name(abf)
+        ylabel = getattr(abf, "sweepUnitsY", "") or "mV"
         self.plot_sweeps(
             time, sweeps, labels=labels,
             title=f"{Path(path).name} — {protocol}",
+            ylabel=ylabel,
         )
 
     def plot_sweeps(self, time: np.ndarray, sweeps: list[np.ndarray],
@@ -41,7 +43,9 @@ class TraceViewer(PlotCanvas):
         # Identify the hovered sweep through the toolbar's coord readout.
         self._hover_time = np.asarray(time, dtype=float)
         self._hover_sweeps = [np.asarray(s, dtype=float) for s in sweeps]
-        self._hover_labels = labels if labels else [f"Sweep {i}" for i in range(len(sweeps))]
+        self._hover_labels = (
+            labels if labels else [f"Sweep {i + 1}" for i in range(len(sweeps))]
+        )
         self._hover_ylabel = ylabel
         self.ax.format_coord = self._format_coord_sweeps
         self.refresh()
@@ -96,4 +100,12 @@ class TraceViewer(PlotCanvas):
         self.ax.set_ylabel(ylabel)
         if title:
             self.ax.set_title(title)
+        self._hover_time = None
+        self._hover_sweeps = None
+        self._hover_labels = None
+        self._hover_ylabel = ylabel
+        self.ax.format_coord = self._format_coord_single
         self.refresh()
+
+    def _format_coord_single(self, x: float, y: float) -> str:
+        return f"x={x:.3f} s, y={y:.2f} {self._hover_ylabel}"

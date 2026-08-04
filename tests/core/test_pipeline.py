@@ -1,6 +1,11 @@
+from dataclasses import replace
+
 import pytest
 from ephys_analysis.core.pipeline import analyze_sample, analyze_all
-from ephys_analysis.core.types import QCStatus, QCReview
+from ephys_analysis.core.types import (
+    OneSAPResult, OneSAPReview, QCStatus, QCReview,
+    BaselineFlag, BaselineReview, SampleResult,
+)
 from ephys_analysis.io.scanner import scan_project_folder
 
 
@@ -15,6 +20,14 @@ def sample_1666_info(scan_result):
         if sample_id == "1666":
             return info
     pytest.fail("Sample 1666 not found in scan result")
+
+
+@pytest.fixture
+def sample_1542_info(scan_result):
+    for (animal_id, sample_id), info in scan_result.samples.items():
+        if sample_id == "1542":
+            return info
+    pytest.fail("Sample 1542 not found in scan result")
 
 
 class TestAnalyzeSample:
@@ -60,8 +73,32 @@ class TestAnalyzeSample:
         common = result.to_common_dict()
         assert list(common.keys()) == [
             "Collection Date", "Experimenter", "Animal ID", "Sample #",
-            "Behavior", "Sex", "Nucleus?",
+            "Behavior", "Sex", "Nucleus?", "Cell Type", "NOTES",
         ]
+
+    def test_file_notes_are_carried_to_sample_result(self, sample_1666_info):
+        protocol, path = next(iter(sample_1666_info.protocols.items()))
+        note = "Review this recording"
+
+        result = analyze_sample(
+            sample_1666_info,
+            nominal_data={},
+            file_notes={str(path): note},
+        )
+
+        assert result.notes == f"{path.name}: {note}"
+
+    def test_qc_note_updates_ap_file_note(self, sample_1666_info):
+        result = analyze_sample(
+            sample_1666_info,
+            nominal_data={},
+            qc_reviewer=lambda sid, path, ap, rmp: QCReview(
+                accepted=True,
+                notes="Threshold reviewed",
+            ),
+        )
+
+        assert "Threshold reviewed" in result.notes
 
 
 class TestQCReviewOverride:
@@ -115,6 +152,341 @@ class TestQCReviewOverride:
 
         assert result.qc_status == QCStatus.USER_REJECTED_VTHRESH
 
+    def test_auto_rejected_sample_is_sent_to_reviewer(self, sample_1542_info):
+        reviewed_samples = []
+
+        def review(sample_id, path, ap, rmp):
+            reviewed_samples.append(sample_id)
+            return QCReview(accepted=False)
+
+        result = analyze_sample(
+            sample_1542_info,
+            nominal_data={},
+            qc_reviewer=review,
+        )
+
+        assert reviewed_samples == ["1542"]
+        assert result.qc_status == QCStatus.RMP_GT_VTHRESH
+
+    def test_auto_rejected_sample_can_be_explicitly_overridden(
+        self, sample_1542_info,
+    ):
+        result = analyze_sample(
+            sample_1542_info,
+            nominal_data={},
+            qc_reviewer=lambda sid, path, ap, rmp: QCReview(
+                accepted=True,
+                override_auto_reject=True,
+            ),
+        )
+
+        assert result.qc_status == QCStatus.PASSED
+
+
+class TestQuickAnalysis:
+    def test_skips_all_qc_and_passes_auto_rejected_sample(
+        self, sample_1542_info,
+    ):
+        def unexpected_review(*args):
+            pytest.fail("Quick Analysis must not invoke a review callback")
+
+        result = analyze_sample(
+            sample_1542_info,
+            nominal_data={},
+            qc_reviewer=unexpected_review,
+            one_s_ap_reviewer=unexpected_review,
+            skip_qc=True,
+        )
+
+        assert result.qc_status == QCStatus.PASSED
+
+    def test_single_selected_protocol_passes_without_qc_dependencies(
+        self, sample_1666_info,
+    ):
+        rmp_path = sample_1666_info.protocols[
+            "2. Resting Membrane Potential"
+        ]
+        selected_info = replace(
+            sample_1666_info,
+            protocols={"2. Resting Membrane Potential": rmp_path},
+        )
+
+        result = analyze_sample(
+            selected_info,
+            nominal_data={},
+            skip_qc=True,
+        )
+
+        assert result.qc_status == QCStatus.PASSED
+        assert result.rmp is not None
+        assert result.ap_fine is None
+
+    def test_processing_error_is_failed_to_analyze_not_auto_rejected(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        rmp_path = sample_1666_info.protocols[
+            "2. Resting Membrane Potential"
+        ]
+        selected_info = replace(
+            sample_1666_info,
+            protocols={"2. Resting Membrane Potential": rmp_path},
+        )
+
+        def fail_analysis(*args, **kwargs):
+            raise ValueError("cannot parse selected file")
+
+        monkeypatch.setattr(pipeline_mod, "analyze_sample", fail_analysis)
+
+        results = analyze_all(
+            {(selected_info.animal_id, selected_info.sample_id): selected_info},
+            nominal_data={},
+            skip_qc=True,
+        )
+
+        assert results[0].qc_status == QCStatus.ANALYSIS_FAILED
+        assert results[0].analysis_error == "cannot parse selected file"
+        assert results[0].file_path == str(rmp_path)
+
+
+class TestBaselineReview:
+    def test_flags_are_reviewed_before_sample_analysis(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        rmp_path = sample_1666_info.protocols[
+            "2. Resting Membrane Potential"
+        ]
+        selected_info = replace(
+            sample_1666_info,
+            protocols={"2. Resting Membrane Potential": rmp_path},
+        )
+        flag = BaselineFlag(
+            protocol="2. Resting Membrane Potential",
+            file_path=str(rmp_path),
+            target_mv=-67.0,
+            baseline_means_mv=[-50.0],
+            out_of_range_sweeps=[1],
+        )
+        monkeypatch.setattr(
+            pipeline_mod,
+            "analyze_baseline_qc",
+            lambda *args, **kwargs: flag,
+        )
+
+        events = []
+
+        def review(flags):
+            events.append(("baseline", flags))
+            return BaselineReview(decisions={str(rmp_path): True})
+
+        results = analyze_all(
+            {(selected_info.animal_id, selected_info.sample_id): selected_info},
+            nominal_data={},
+            baseline_reviewer=review,
+            progress_callback=lambda idx, message: events.append(
+                ("progress", message)
+            ),
+        )
+
+        assert events[0] == ("baseline", [("1666", flag)])
+        assert events[1][0] == "progress"
+        assert results[0].rmp is not None
+
+    def test_rejected_file_is_removed_before_analysis_without_mutating_scan(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        protocol = "2. Resting Membrane Potential"
+        rmp_path = sample_1666_info.protocols[protocol]
+        selected_info = replace(
+            sample_1666_info,
+            protocols={protocol: rmp_path},
+        )
+        flag = BaselineFlag(
+            protocol=protocol,
+            file_path=str(rmp_path),
+            target_mv=-67.0,
+            baseline_means_mv=[-50.0],
+            out_of_range_sweeps=[1],
+        )
+        monkeypatch.setattr(
+            pipeline_mod,
+            "analyze_baseline_qc",
+            lambda *args, **kwargs: flag,
+        )
+        analyzed_infos = []
+
+        def capture_info(info, *args, **kwargs):
+            analyzed_infos.append(info)
+            return SampleResult(
+                sample_id=info.sample_id,
+                animal_id=info.animal_id,
+            )
+
+        monkeypatch.setattr(pipeline_mod, "analyze_sample", capture_info)
+
+        analyze_all(
+            {(selected_info.animal_id, selected_info.sample_id): selected_info},
+            nominal_data={},
+            baseline_reviewer=lambda flags: BaselineReview(
+                decisions={str(rmp_path): False}
+            ),
+        )
+
+        assert analyzed_infos[0].protocols == {}
+        assert selected_info.protocols == {protocol: rmp_path}
+
+    def test_review_must_decide_every_flagged_file(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        protocol = "2. Resting Membrane Potential"
+        rmp_path = sample_1666_info.protocols[protocol]
+        selected_info = replace(
+            sample_1666_info,
+            protocols={protocol: rmp_path},
+        )
+        flag = BaselineFlag(
+            protocol=protocol,
+            file_path=str(rmp_path),
+            target_mv=-67.0,
+            baseline_means_mv=[-50.0],
+            out_of_range_sweeps=[1],
+        )
+        monkeypatch.setattr(
+            pipeline_mod,
+            "analyze_baseline_qc",
+            lambda *args, **kwargs: flag,
+        )
+
+        with pytest.raises(ValueError, match="did not decide every flagged file"):
+            analyze_all(
+                {
+                    (selected_info.animal_id, selected_info.sample_id):
+                        selected_info
+                },
+                nominal_data={},
+                baseline_reviewer=lambda flags: BaselineReview(),
+            )
+
+    def test_quick_analysis_skips_baseline_scan(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        def unexpected_check(*args, **kwargs):
+            pytest.fail("Quick Analysis must not run baseline QC")
+
+        monkeypatch.setattr(
+            pipeline_mod, "analyze_baseline_qc", unexpected_check
+        )
+
+        analyze_all(
+            {
+                (sample_1666_info.animal_id, sample_1666_info.sample_id):
+                    sample_1666_info
+            },
+            nominal_data={},
+            baseline_reviewer=lambda flags: pytest.fail(
+                "Quick Analysis must not review baseline flags"
+            ),
+            skip_qc=True,
+        )
+
+
+class TestOneSAPFlagReview:
+    @staticmethod
+    def _flagged_result(*args, **kwargs):
+        return OneSAPResult(sudden_drop_sweeps=[2])
+
+    def test_remove_marks_sample_user_rejected(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        monkeypatch.setattr(
+            pipeline_mod, "analyze_one_s_ap", self._flagged_result
+        )
+
+        result = analyze_sample(
+            sample_1666_info,
+            nominal_data={},
+            one_s_ap_reviewer=lambda sid, paths, one_s: OneSAPReview(
+                accepted=False
+            ),
+        )
+
+        assert result.qc_status == QCStatus.USER_REJECTED_1S_AP
+        assert result.file_path.endswith("2026_02_04_JCA_0009.abf")
+
+    def test_keep_preserves_passed_status(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        monkeypatch.setattr(
+            pipeline_mod, "analyze_one_s_ap", self._flagged_result
+        )
+
+        result = analyze_sample(
+            sample_1666_info,
+            nominal_data={},
+            one_s_ap_reviewer=lambda sid, paths, one_s: OneSAPReview(
+                accepted=True
+            ),
+        )
+
+        assert result.qc_status == QCStatus.PASSED
+
+    @pytest.mark.parametrize("accepted", [True, False])
+    def test_auto_rejected_sample_is_still_reviewed_and_remains_rejected(
+        self, sample_1542_info, monkeypatch, accepted,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        monkeypatch.setattr(
+            pipeline_mod, "analyze_one_s_ap", self._flagged_result
+        )
+        reviewed = []
+
+        def review(sample_id, paths, one_s):
+            reviewed.append(sample_id)
+            return OneSAPReview(accepted=accepted)
+
+        result = analyze_sample(
+            sample_1542_info,
+            nominal_data={},
+            one_s_ap_reviewer=review,
+        )
+
+        assert reviewed == ["1542"]
+        assert result.qc_status == QCStatus.RMP_GT_VTHRESH
+
+    def test_review_note_is_exportable_sample_note(
+        self, sample_1666_info, monkeypatch,
+    ):
+        import ephys_analysis.core.pipeline as pipeline_mod
+
+        monkeypatch.setattr(
+            pipeline_mod, "analyze_one_s_ap", self._flagged_result
+        )
+
+        result = analyze_sample(
+            sample_1666_info,
+            nominal_data={},
+            one_s_ap_reviewer=lambda sid, paths, one_s: OneSAPReview(
+                accepted=True,
+                notes="Fast-spiking pattern reviewed",
+            ),
+        )
+
+        assert "Fast-spiking pattern reviewed" in result.notes
+
 
 class TestAnalyzeAll:
     def test_processes_all_samples(self, scan_result):
@@ -127,11 +499,12 @@ class TestAnalyzeAll:
         a result for every sample, including a known-good neighbour.
         """
         from ephys_analysis.io.scanner import SampleInfo
+        from ephys_analysis.protocols import PROTO_RMP
         from pathlib import Path
 
         bad_info = SampleInfo(
             animal_id="bad", sample_id="0000",
-            protocols={"fake": Path("nonexistent.abf")},
+            protocols={PROTO_RMP: Path("nonexistent.abf")},
         )
         samples = dict(scan_result.samples)
         samples[("bad", "0000")] = bad_info
@@ -139,6 +512,9 @@ class TestAnalyzeAll:
         results = analyze_all(samples, nominal_data={})
 
         assert len(results) == len(samples)
+        bad_result = next(r for r in results if r.sample_id == "0000")
+        assert bad_result.qc_status == QCStatus.ANALYSIS_FAILED
+        assert bad_result.analysis_error
         # A known-good sample's RMP must still populate after the bad neighbour.
         known_good = next(r for r in results if r.sample_id == "1666")
         assert known_good.rmp is not None

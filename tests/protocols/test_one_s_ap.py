@@ -49,114 +49,78 @@ class TestAnalyzeOneSAP:
         assert result.ithresh_pa == pytest.approx(500.0)
 
 
-class TestHyperfiringRejection:
-    """Spec rule: sweeps with > 50 detected peaks are flagged for user review.
-    spike_count and firing_freq_hz are set to None (not zero) so cross-cell
-    averages over the per-sweep columns treat them as missing data rather
-    than dragging the mean toward zero. raw_spike_count is preserved.
-    """
+def _inject_spikes(abf, target_sweep: int, n_spikes: int):
+    rate = abf.sampleRate
+    onset_sample = int(0.297 * rate)
+    step_samples = int(1.0 * rate)
+    step_start = target_sweep * abf.sweepPointCount + onset_sample
+    step_end = step_start + step_samples
+    abf.data[0, step_start:step_end] = -65.0
+    spacing = step_samples // n_spikes
+    for i in range(n_spikes):
+        center = step_start + i * spacing + spacing // 2
+        if center + 10 >= step_end:
+            break
+        abf.data[0, center - 10:center] = np.linspace(-65, 30, 10)
+        abf.data[0, center:center + 10] = np.linspace(30, -65, 10)
 
-    def test_synthetic_51_spike_sweep_is_rejected(self, abf_1s_ap):
-        abf = load_abf(abf_1s_ap)
-        rate = abf.sampleRate
-        target = abf.sweepCount - 1  # last sweep, highest current
 
-        onset_sample = int(0.297 * rate)
-        step_samples = int(1.0 * rate)
-        sweep_offset = target * abf.sweepPointCount
-        step_start = sweep_offset + onset_sample
-        step_end = step_start + step_samples
-
-        # 51 narrow triangle spikes at -65 → +30 → -65, every ~19 ms.
-        abf.data[0, step_start:step_end] = -65.0
-        n_spikes = 51
-        spacing = step_samples // n_spikes
-        for i in range(n_spikes):
-            center = step_start + i * spacing + spacing // 2
-            if center + 10 >= step_end:
-                break
-            abf.data[0, center - 10:center] = np.linspace(-65, 30, 10)
-            abf.data[0, center:center + 10] = np.linspace(30, -65, 10)
+class TestOneSAPReviewFlags:
+    def test_sudden_drop_flag_matches_sample_1533(self, abf_1s_ap_sudden_drop):
+        abf = load_abf(abf_1s_ap_sudden_drop)
 
         result = analyze_one_s_ap(abf)
 
-        assert result.sweeps[target].rejected is True
+        assert result.sudden_drop_sweeps == [13]
+        assert result.sweeps[12].sudden_drop is True
 
-    def test_rejected_sweep_spike_count_is_none(self, abf_1s_ap):
+    def test_stimulus_baseline_flag_matches_sample_1669(
+        self, abf_1s_ap_baseline_zero
+    ):
+        abf = load_abf(abf_1s_ap_baseline_zero)
+
+        result = analyze_one_s_ap(abf)
+
+        assert result.baseline_at_or_above_zero_sweeps == [12, 13, 14, 15, 16]
+        assert result.sweeps[11].stimulus_baseline_mv >= 0.0
+
+    def test_hundred_spikes_is_review_threshold(self, abf_1s_ap):
         abf = load_abf(abf_1s_ap)
-        rate = abf.sampleRate
         target = abf.sweepCount - 1
-
-        onset_sample = int(0.297 * rate)
-        step_samples = int(1.0 * rate)
-        step_start = target * abf.sweepPointCount + onset_sample
-        step_end = step_start + step_samples
-        abf.data[0, step_start:step_end] = -65.0
-        n_spikes = 51
-        spacing = step_samples // n_spikes
-        for i in range(n_spikes):
-            center = step_start + i * spacing + spacing // 2
-            if center + 10 >= step_end:
-                break
-            abf.data[0, center - 10:center] = np.linspace(-65, 30, 10)
-            abf.data[0, center:center + 10] = np.linspace(30, -65, 10)
+        _inject_spikes(abf, target_sweep=target, n_spikes=100)
 
         result = analyze_one_s_ap(abf)
 
-        assert result.sweeps[target].spike_count is None
-        assert result.sweeps[target].firing_freq_hz is None
+        assert result.sweeps[target].flagged_high_firing is True
+        assert result.high_firing_sweeps == [target + 1]
 
-    def test_rejected_sweep_preserves_raw_spike_count(self, abf_1s_ap):
+    def test_ninety_nine_spikes_is_not_flagged(self, abf_1s_ap):
         abf = load_abf(abf_1s_ap)
-        rate = abf.sampleRate
         target = abf.sweepCount - 1
-
-        onset_sample = int(0.297 * rate)
-        step_samples = int(1.0 * rate)
-        step_start = target * abf.sweepPointCount + onset_sample
-        step_end = step_start + step_samples
-        abf.data[0, step_start:step_end] = -65.0
-        n_spikes = 51
-        spacing = step_samples // n_spikes
-        for i in range(n_spikes):
-            center = step_start + i * spacing + spacing // 2
-            if center + 10 >= step_end:
-                break
-            abf.data[0, center - 10:center] = np.linspace(-65, 30, 10)
-            abf.data[0, center:center + 10] = np.linspace(30, -65, 10)
+        _inject_spikes(abf, target_sweep=target, n_spikes=99)
 
         result = analyze_one_s_ap(abf)
 
-        assert result.sweeps[target].raw_spike_count > 50
+        assert result.sweeps[target].flagged_high_firing is False
+        assert result.high_firing_sweeps == []
 
-    def test_rejected_sweep_has_empty_isi(self, abf_1s_ap):
-        abf = load_abf(abf_1s_ap)
-        rate = abf.sampleRate
-        target = abf.sweepCount - 1
-
-        onset_sample = int(0.297 * rate)
-        step_samples = int(1.0 * rate)
-        step_start = target * abf.sweepPointCount + onset_sample
-        step_end = step_start + step_samples
-        abf.data[0, step_start:step_end] = -65.0
-        n_spikes = 51
-        spacing = step_samples // n_spikes
-        for i in range(n_spikes):
-            center = step_start + i * spacing + spacing // 2
-            if center + 10 >= step_end:
-                break
-            abf.data[0, center - 10:center] = np.linspace(-65, 30, 10)
-            abf.data[0, center:center + 10] = np.linspace(30, -65, 10)
+    def test_high_firing_sweep_values_are_preserved(self, abf_1s_ap_high_firing):
+        abf = load_abf(abf_1s_ap_high_firing)
 
         result = analyze_one_s_ap(abf)
 
-        assert result.sweeps[target].isi_ms == []
+        sweep = result.sweeps[10]
+        assert result.high_firing_sweeps == [11, 12]
+        assert sweep.spike_count == 119
+        assert sweep.firing_freq_hz == pytest.approx(119.0)
+        assert sweep.isi_ms
+        assert result.max_ff_hz == pytest.approx(129.0)
+        assert result.requires_review is True
 
 
 class TestIthreshFF:
-    """``ithresh_ff_hz`` is None when AP fine's measured Ithresh does not land
-    within half a step of any 1s AP sweep current — leaves the spreadsheet
-    cell blank rather than reporting a misleading 0.
+    """``ithresh_ff_hz`` comes from the first nominal current at or above
+    AP fine's measured Ithresh and is blank when no such sweep has an FF.
     """
 
     def test_returns_none_when_ithresh_pa_is_zero(self, abf_1s_ap):
@@ -166,7 +130,7 @@ class TestIthreshFF:
 
         assert result.ithresh_ff_hz is None
 
-    def test_returns_none_when_ithresh_far_from_any_step(self, abf_1s_ap):
+    def test_returns_none_when_ithresh_exceeds_highest_current(self, abf_1s_ap):
         abf = load_abf(abf_1s_ap)
 
         result = analyze_one_s_ap(abf, ithresh_pa=99999.0)
@@ -183,6 +147,24 @@ class TestIthreshFF:
         result = analyze_one_s_ap(abf, ithresh_pa=target.current_pa)
 
         assert result.ithresh_ff_hz == pytest.approx(target.firing_freq_hz)
+
+    def test_uses_first_current_above_ithresh_between_steps(self, abf_1s_ap):
+        abf = load_abf(abf_1s_ap)
+        probe = analyze_one_s_ap(abf)
+        adjacent = zip(probe.sweeps, probe.sweeps[1:])
+        lower, upper = next(
+            (lower, upper)
+            for lower, upper in adjacent
+            if lower.firing_freq_hz is not None
+            and upper.firing_freq_hz is not None
+            and lower.firing_freq_hz != upper.firing_freq_hz
+        )
+        ithresh = lower.current_pa + 0.1 * (upper.current_pa - lower.current_pa)
+
+        result = analyze_one_s_ap(abf, ithresh_pa=ithresh)
+
+        assert lower.current_pa < ithresh < upper.current_pa
+        assert result.ithresh_ff_hz == pytest.approx(upper.firing_freq_hz)
 
 
 class TestRheobaseSuFF:
@@ -213,61 +195,31 @@ class TestRheobaseSuFF:
         assert result.rheobase_su_ff_hz == pytest.approx(0.0)
 
 
-def _inject_51_spikes(abf, target_sweep: int):
-    rate = abf.sampleRate
-    onset_sample = int(0.297 * rate)
-    step_samples = int(1.0 * rate)
-    step_start = target_sweep * abf.sweepPointCount + onset_sample
-    step_end = step_start + step_samples
-    abf.data[0, step_start:step_end] = -65.0
-    n_spikes = 51
-    spacing = step_samples // n_spikes
-    for i in range(n_spikes):
-        center = step_start + i * spacing + spacing // 2
-        if center + 10 >= step_end:
-            break
-        abf.data[0, center - 10:center] = np.linspace(-65, 30, 10)
-        abf.data[0, center:center + 10] = np.linspace(30, -65, 10)
-
-
-class TestRejectedSweepsSkippedInSummaryMetrics:
-    """A rejected sweep's FF is None, so summary metrics that pick a specific
-    sweep (Rheobase SU FF, Ithresh FF) must skip it rather than treating its
-    zeroed FF as a real value. Without the skip, a hyper-firing sweep at the
-    metric's chosen step would report FF=0 — falsely implying "no firing".
-    """
-
-    def test_max_ff_ignores_rejected_sweep(self, abf_1s_ap):
+class TestFlaggedSweepsRemainInSummaryMetrics:
+    def test_high_firing_sweep_can_supply_max_ff(self, abf_1s_ap):
         abf = load_abf(abf_1s_ap)
-        baseline = analyze_one_s_ap(abf)
-        # Inject 51 spikes into the lowest-FF non-rejected sweep so it can't
-        # accidentally still hold the max if rejected sweeps were counted.
-        _inject_51_spikes(abf, target_sweep=abf.sweepCount - 1)
+        target = abf.sweepCount - 1
+        _inject_spikes(abf, target_sweep=target, n_spikes=100)
 
         result = analyze_one_s_ap(abf)
 
-        assert result.sweeps[abf.sweepCount - 1].rejected is True
-        assert result.max_ff_hz == pytest.approx(baseline.max_ff_hz)
+        assert result.sweeps[target].flagged_high_firing is True
+        assert result.max_ff_hz == pytest.approx(100.0)
 
-    def test_rheobase_su_ff_blank_when_first_supra_sweep_rejected(self, abf_1s_ap):
+    def test_high_firing_sweep_can_supply_rheobase_su_ff(self, abf_1s_ap):
         abf = load_abf(abf_1s_ap)
-        # rheobase = 75 → first sweep above is index 2 (100 pA).
-        _inject_51_spikes(abf, target_sweep=2)
+        _inject_spikes(abf, target_sweep=2, n_spikes=100)
 
         result = analyze_one_s_ap(abf, rheobase_pa=75.0)
 
-        assert result.sweeps[2].rejected is True
-        # The metric picks the first sweep above rheobase; that sweep is
-        # rejected, so the value stays at its default 0.0 — the user sees
-        # the rejection mark and knows to disregard.
-        assert result.rheobase_su_ff_hz == pytest.approx(0.0)
+        assert result.sweeps[2].flagged_high_firing is True
+        assert result.rheobase_su_ff_hz == pytest.approx(100.0)
 
-    def test_ithresh_ff_none_when_nearest_sweep_rejected(self, abf_1s_ap):
+    def test_high_firing_sweep_can_supply_ithresh_ff(self, abf_1s_ap):
         abf = load_abf(abf_1s_ap)
-        # Target the 300 pA sweep (index 6). Ithresh=300 lands exactly on it.
-        _inject_51_spikes(abf, target_sweep=6)
+        _inject_spikes(abf, target_sweep=6, n_spikes=100)
 
         result = analyze_one_s_ap(abf, ithresh_pa=300.0)
 
-        assert result.sweeps[6].rejected is True
-        assert result.ithresh_ff_hz is None
+        assert result.sweeps[6].flagged_high_firing is True
+        assert result.ithresh_ff_hz == pytest.approx(100.0)

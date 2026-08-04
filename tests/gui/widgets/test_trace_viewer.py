@@ -64,6 +64,23 @@ class TestPlotSingle:
         # The data line + one axvline produces 2 lines on the axis.
         assert len(viewer.ax.lines) == 2
 
+    def test_clears_multi_sweep_hover_state(self, qtbot):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+        time = np.linspace(0, 1, 10)
+        viewer.plot_sweeps(
+            time,
+            [np.zeros(10), np.ones(10)],
+            labels=["Sweep 1", "Sweep 2"],
+            ylabel="pA",
+        )
+
+        viewer.plot_single(time, np.zeros(10), ylabel="mV")
+
+        readout = viewer.ax.format_coord(0.5, 0.0)
+        assert "Sweep" not in readout
+        assert readout.endswith("mV")
+
 
 class TestPlotAbf:
     def test_loads_and_plots_real_abf(self, qtbot, abf_ap_fine):
@@ -74,6 +91,22 @@ class TestPlotAbf:
 
         # max_sweeps caps at 3, so up to 3 lines drawn.
         assert 1 <= len(viewer.ax.lines) <= 3
+
+    def test_uses_recorded_response_units_for_epsc(self, qtbot, abf_epsc):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+
+        viewer.plot_abf(abf_epsc)
+
+        assert viewer.ax.get_ylabel() == "pA"
+
+    def test_uses_one_based_sweep_labels(self, qtbot, abf_ap_fine):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+
+        viewer.plot_abf(abf_ap_fine, max_sweeps=2)
+
+        assert viewer._hover_labels == ["Sweep 1", "Sweep 2"]
 
 
 class TestHoverReadout:
@@ -114,7 +147,7 @@ class TestHoverReadout:
         viewer.plot_sweeps(time, sweeps)
         readout = viewer.ax.format_coord(0.5, -30.0)
 
-        assert "Sweep 1" in readout
+        assert "Sweep 2" in readout
 
     def test_no_legend_artist_is_drawn(self, qtbot):
         viewer = TraceViewer()

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Callable
 
 import pandas as pd
@@ -6,8 +7,41 @@ from pathlib import Path
 from ephys_analysis.core.types import SampleResult, QCStatus
 
 
+_REJECTED_STATUSES = {
+    QCStatus.USER_REJECTED_VTHRESH,
+    QCStatus.USER_REJECTED_1S_AP,
+    QCStatus.RMP_GT_VTHRESH,
+    QCStatus.ANALYSIS_FAILED,
+}
+
+
+def create_export_timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _output_path(
+    output_dir: Path, label: str, timestamp: str | None
+) -> Path:
+    stamp = timestamp or create_export_timestamp()
+    name = f"{label}_{stamp}"
+    folder = Path(output_dir) / name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{name}.xlsx"
+
+
 def _sort_by_sample(df: pd.DataFrame) -> pd.DataFrame:
-    return df.sort_values("Sample #").reset_index(drop=True)
+    sample_text = df["Sample #"].astype(str)
+    sample_number = pd.to_numeric(sample_text, errors="coerce")
+    return (
+        df.assign(_sample_number=sample_number, _sample_text=sample_text)
+        .sort_values(
+            ["_sample_number", "_sample_text"],
+            na_position="last",
+            kind="stable",
+        )
+        .drop(columns=["_sample_number", "_sample_text"])
+        .reset_index(drop=True)
+    )
 
 
 def _write_tab(
@@ -108,7 +142,9 @@ def _firing_row(s: SampleResult) -> dict | None:
     if not s.one_s_ap or not s.one_s_ap.sweeps:
         return None
     row = s.to_common_dict()
-    row["First Sweep"] = s.one_s_ap.first_sweep
+    row["First Sweep"] = (
+        s.one_s_ap.first_sweep + 1 if s.one_s_ap.first_sweep >= 0 else None
+    )
     row["First FF (Hz)"] = s.one_s_ap.first_ff_hz
     row["Max FF (Hz)"] = s.one_s_ap.max_ff_hz
     row["Ithresh (pA)"] = s.one_s_ap.ithresh_pa
@@ -117,9 +153,7 @@ def _firing_row(s: SampleResult) -> dict | None:
     for sw in s.one_s_ap.sweeps:
         row[f"FF {sw.current_pa:.0f}pA"] = sw.firing_freq_hz
     for sw in s.one_s_ap.sweeps:
-        if sw.rejected:
-            mean_isi = None
-        elif sw.isi_ms:
+        if sw.isi_ms:
             mean_isi = sum(sw.isi_ms) / len(sw.isi_ms)
         else:
             mean_isi = 0.0
@@ -181,9 +215,13 @@ def _fully_compiled_row(s: SampleResult) -> dict:
 # ---- Reject-row wrapper ---------------------------------------------------
 
 def _flag_for(s: SampleResult) -> str:
-    """USER if a human rejected via the QC dialog; AUTO if the automatic
-    RMP > VThresh gate failed the cell."""
-    if s.qc_status == QCStatus.USER_REJECTED_VTHRESH:
+    """Describe why a result was not included with passed samples."""
+    if s.qc_status == QCStatus.ANALYSIS_FAILED:
+        return "FAILED TO ANALYZE"
+    if s.qc_status in (
+        QCStatus.USER_REJECTED_VTHRESH,
+        QCStatus.USER_REJECTED_1S_AP,
+    ):
         return "USER"
     return "AUTO"  # QCStatus.RMP_GT_VTHRESH
 
@@ -202,6 +240,26 @@ def _rejected_row(builder: Callable[[SampleResult], dict | None]):
             **common,
             "FLAG": _flag_for(s),
             "File Path": s.file_path,
+            "Analysis Error": s.analysis_error,
+            **metrics,
+        }
+    return _build
+
+
+def _merged_row(builder: Callable[[SampleResult], dict | None]):
+    """Add the reject metadata columns used when PASSED and REJECTED merge."""
+    def _build(s: SampleResult) -> dict | None:
+        base = builder(s)
+        if base is None:
+            return None
+        common = s.to_common_dict()
+        metrics = {k: v for k, v in base.items() if k not in common}
+        rejected = s.qc_status in _REJECTED_STATUSES
+        return {
+            **common,
+            "FLAG": _flag_for(s) if rejected else "",
+            "File Path": s.file_path if rejected else "",
+            "Analysis Error": s.analysis_error,
             **metrics,
         }
     return _build
@@ -227,19 +285,17 @@ _COMPOSITE_TABS: list[tuple[str, Callable[[SampleResult], dict | None]]] = [
 ]
 
 
-def export_passed(results: list[SampleResult], output_dir: Path) -> Path | None:
-    """Export PASSED results to PASSED/results.xlsx, one tab per protocol
-    plus a Fully Compiled master tab. Only QCStatus.PASSED samples are
-    included — per customer Q2: 'separate metrics for PASSED and REJECTED,
-    not intermingled'.
-    """
+def export_passed(
+    results: list[SampleResult],
+    output_dir: Path,
+    timestamp: str | None = None,
+) -> Path | None:
+    """Export PASSED samples to a timestamped composite workbook."""
     passed = [r for r in results if r.qc_status == QCStatus.PASSED]
     if not passed:
         return None
 
-    output_dir = Path(output_dir) / "PASSED"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "results.xlsx"
+    path = _output_path(output_dir, "PASSED Results", timestamp)
 
     with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
         for sheet_name, builder in _COMPOSITE_TABS:
@@ -248,23 +304,20 @@ def export_passed(results: list[SampleResult], output_dir: Path) -> Path | None:
     return path
 
 
-def export_rejected(results: list[SampleResult], output_dir: Path) -> Path | None:
-    """Export every rejected sample to a single REJECTED/results.xlsx with the
-    same tab structure as PASSED. Each row carries a FLAG column ('USER' for
-    samples a human rejected via the QC dialog, 'AUTO' for samples the
-    automatic RMP > VThresh gate failed) and a File Path column so reviewers
-    can find the source ABF when re-classifying an edge case.
-    """
+def export_rejected(
+    results: list[SampleResult],
+    output_dir: Path,
+    timestamp: str | None = None,
+) -> Path | None:
+    """Export every rejected sample to a timestamped composite workbook."""
     rejected = [
         r for r in results
-        if r.qc_status in (QCStatus.USER_REJECTED_VTHRESH, QCStatus.RMP_GT_VTHRESH)
+        if r.qc_status in _REJECTED_STATUSES
     ]
     if not rejected:
         return None
 
-    output_dir = Path(output_dir) / "REJECTED"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "results.xlsx"
+    path = _output_path(output_dir, "REJECTED Results", timestamp)
 
     with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
         for sheet_name, builder in _COMPOSITE_TABS:
@@ -273,37 +326,26 @@ def export_rejected(results: list[SampleResult], output_dir: Path) -> Path | Non
     return path
 
 
-def export_hyperfiring_sweeps(results: list[SampleResult], output_dir: Path) -> Path | None:
-    """Export 1s AP sweeps with > 50 spikes (spec's hyper-firing rejection).
-
-    One row per rejected sweep. Users review these to decide whether they are
-    genuinely hyper-firing cells (keep) or analysis artefacts (discard).
-    """
-    rows = []
-    for s in results:
-        if not s.one_s_ap:
-            continue
-        for sweep_idx, sw in enumerate(s.one_s_ap.sweeps):
-            if not sw.rejected:
-                continue
-            row = s.to_common_dict()
-            row["Sweep #"] = sweep_idx + 1
-            row["Current (pA)"] = sw.current_pa
-            row["Raw Spike Count"] = sw.raw_spike_count
-            rows.append(row)
-
-    if not rows:
+def export_fully_compiled(
+    results: list[SampleResult],
+    output_dir: Path,
+    timestamp: str | None = None,
+) -> Path | None:
+    """Export the sorted union of PASSED and REJECTED composite workbooks."""
+    if not results:
         return None
 
-    output_dir = Path(output_dir) / "1s AP Rejected Sweeps"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "results.xlsx"
-    _sort_by_sample(pd.DataFrame(rows)).to_excel(str(path), index=False)
+    path = _output_path(output_dir, "FULLY COMPILED Results", timestamp)
+    with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
+        for sheet_name, builder in _COMPOSITE_TABS:
+            _write_tab(writer, results, sheet_name, _merged_row(builder))
     return path
 
 
 def export_ri_ih_contaminated_sweeps(
-    results: list[SampleResult], output_dir: Path
+    results: list[SampleResult],
+    output_dir: Path,
+    timestamp: str | None = None,
 ) -> Path | None:
     """Export Ri/Ih sweeps with APs in their baseline or steady-state windows.
 
@@ -325,18 +367,18 @@ def export_ri_ih_contaminated_sweeps(
     if not rows:
         return None
 
-    output_dir = Path(output_dir) / "Ri-Ih Contaminated Sweeps"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "results.xlsx"
+    path = _output_path(output_dir, "Ri-Ih Contaminated Sweeps", timestamp)
     _sort_by_sample(pd.DataFrame(rows)).to_excel(str(path), index=False)
     return path
 
 
-def export_trimming_analysis(results: list[SampleResult], output_dir: Path) -> Path:
+def export_trimming_analysis(
+    results: list[SampleResult],
+    output_dir: Path,
+    timestamp: str | None = None,
+) -> Path:
     """Export QC trimming analysis summary."""
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "trimming_analysis.xlsx"
+    path = _output_path(output_dir, "Trimming Analysis", timestamp)
 
     rows = []
     for s in results:
@@ -344,6 +386,7 @@ def export_trimming_analysis(results: list[SampleResult], output_dir: Path) -> P
         row["Starting RMP (mV)"] = s.rmp.rmp_mv if s.rmp else None
         row["VThresh (mV)"] = s.ap_fine.voltage_threshold_mv if s.ap_fine else None
         row["QC Status"] = s.qc_status.value
+        row["Analysis Error"] = s.analysis_error
         rows.append(row)
 
     df = _sort_by_sample(pd.DataFrame(rows)) if rows else pd.DataFrame()

@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from ephys_analysis.core.abf_io import load_abf
+from ephys_analysis.core.abf_io import get_sweep_data, load_abf
 from ephys_analysis.protocols.ap import analyze_ap_fine, analyze_ap_coarse
 
 
@@ -65,6 +65,35 @@ class TestAnalyzeAPFine:
         result = analyze_ap_fine(abf)
 
         assert result.current_threshold_pa == pytest.approx(581.370, abs=0.01)
+
+    def test_current_threshold_uses_inclusive_protocol_cursors(self, abf_ap_fine):
+        abf = load_abf(abf_ap_fine)
+
+        result = analyze_ap_fine(abf)
+        stimulus = get_sweep_data(abf, result.sweep_num - 1, channel=1)
+        rate = abf.sampleRate
+        expected_baseline = float(np.mean(stimulus[0:round(0.2 * rate) + 1]))
+        expected_step = float(
+            np.mean(
+                stimulus[
+                    round(0.29695 * rate):round(0.29885 * rate) + 1
+                ]
+            )
+        )
+
+        assert result.stim_baseline_pa == pytest.approx(expected_baseline, abs=1e-6)
+        assert result.stim_step_pa == pytest.approx(expected_step, abs=1e-6)
+
+    def test_negative_stimulus_pulse_uses_fixed_protocol_cursor(
+        self, abf_ap_fine_negative_pulse
+    ):
+        abf = load_abf(abf_ap_fine_negative_pulse)
+
+        result = analyze_ap_fine(abf)
+
+        assert result is not None
+        assert result.stim_step_pa < 0
+        assert result.current_threshold_pa == pytest.approx(1207.31885, abs=0.001)
 
     def test_sweep_num_within_valid_range(self, abf_ap_fine):
         abf = load_abf(abf_ap_fine)

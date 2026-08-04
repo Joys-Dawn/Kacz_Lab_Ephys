@@ -1,6 +1,6 @@
 # Kacz Lab Ephys Analysis
 
-A desktop GUI that turns a folder of Axon `.abf` recordings into a compiled spreadsheet of electrophysiology parameters. It walks every sample in your project, runs each protocol's analysis (RMP, Ih/Ri, AP fine, Ramp, 1s AP firing, 5/25/50 AHP), shows a per-cell quality-control review of the voltage threshold, then writes the final results into an Excel workbook laid out the way your lab already compiles data.
+A desktop GUI that turns a folder of Axon `.abf` recordings into compiled spreadsheets of electrophysiology parameters. It walks every sample in your project, runs each protocol's analysis (RMP, Ih/Ri, AP fine, Ramp, 1s AP firing, 5/25/50 AHP), shows a per-cell quality-control review of the voltage threshold, then writes the final results into Excel workbooks laid out the way your lab already compiles data.
 
 ## Installation
 
@@ -35,11 +35,14 @@ Each sample folder typically contains one `.abf` per protocol. Protocol identity
 
 ## Application Workflow
 
-The GUI has four actions in the toolbar, used in order:
+The GUI has five toolbar actions. Detailed and Quick Analysis are independent
+ways to run the loaded project.
 
 ### 1. Open Project Folder
 
 Click **Open Project Folder** and pick the project root. The app walks every animal / sample / `.abf` file, reads each file's protocol string, and builds a tree view grouped by Animal → Sample → Files. If any sample has more than one file for the same protocol, a **duplicate resolver dialog** opens so you can preview each file's traces and pick which to keep.
+
+Selecting an ABF also opens its trace preview and its **File Notes** editor. The preview reads the recorded response units from the ABF, so spontaneous EPSCs display and scale in pA while current-clamp protocols display in mV. Notes are stored against that selected file and carried into every exported workbook under `NOTES`.
 
 ### 2. Load Nominal Variables (optional)
 
@@ -50,24 +53,49 @@ Click **Load Nominal Variables** and pick an Excel file that maps each Sample # 
 Click **Run Analysis**. The pipeline runs per sample in the order dictated by the QC gate:
 
 ```
-RMP → AP fine → (VThresh QC review) → Ri/Ih → Ramp → 1s AP → 5/25/50 AHP
+RMP → AP fine → (VThresh QC review) → Ri/Ih → Ramp → 1s AP → (flag review when needed) → 5/25/50 AHP
 ```
 
-Samples whose RMP is more depolarized than their voltage threshold are automatically excluded (the `RMP > VThresh` cutoff) — no dialog, straight to the rejected folder.
+Detailed analysis starts by checking the first 200 ms baseline of every
+applicable voltage recording. EPSCs, membrane tests, non-mV recordings, and
+recordings shorter than 200 ms are excluded from this check. Flagged files are
+shown in a scrollable review before protocol analysis continues. Every flagged
+file can be previewed and must be explicitly accepted or rejected. Rejected
+recordings are removed from that sample's protocol set before analysis; the
+sample's other accepted recordings remain available.
 
-### 4. Export Results
+Every sample with RMP and AP threshold data then appears in VThresh QC. A
+sample whose RMP is more depolarized than its voltage threshold is labeled
+`REJECTED - RMP>Threshold`; the user can keep that automatic rejection or use
+`Override Auto-Reject` to retain the sample.
 
-Click **Export Results** and pick an output folder. The app writes five things:
+During VThresh QC, the AP threshold picker stays visible while the adjacent protocol selector can display any other recording from that sample. Notes for the AP source can also be edited in the same dialog.
+
+### 4. Quick Analysis
+
+Select one or more analyzable ABF files in the project tree, then click
+**Quick Analysis**. Only those files are processed. Quick Analysis does not run
+baseline QC, automatic `RMP>VThresh` QC, VThresh review, or 1s flag review. It
+does not depend on a previous detailed run. Selected EPSC, membrane-test, or
+other files without implemented analysis metrics are reported and omitted
+rather than generating empty results. Processing errors are reported as
+`Failed to Analyze`, never as automatic QC rejections. When processing
+finishes, the completion prompt can open the export workflow immediately or
+be dismissed to export later from the toolbar.
+
+### 5. Export Results
+
+Click **Export Results** and pick an output folder. One timestamp is generated for the export and included in every folder and filename. The app writes five things:
 
 | Output | Contents |
 |---|---|
-| `PASSED/results.xlsx` | Main workbook for PASSED samples only — one tab per protocol plus a `Fully Compiled` master tab with one row per sample. |
-| `REJECTED/results.xlsx` | Same tab structure as PASSED, but for every rejected sample. Each row carries a `FLAG` column (`USER` for samples you rejected at the QC review dialog, `AUTO` for samples auto-excluded by the `RMP > VThresh` cutoff) and a `File Path` column so you can find the source `.abf`. |
-| `1s AP Rejected Sweeps/results.xlsx` | 1s AP sweeps that fired more than 50 spikes (zeroed in PASSED, preserved here for review). |
-| `Ri-Ih Contaminated Sweeps/results.xlsx` | Ri/Ih sweeps that had an AP in their baseline (0–0.2 s) or steady-state (1.0–1.2 s) window — excluded from the Ri regression and sag calculations, preserved here for review. |
-| `trimming_analysis.xlsx` | Flat summary: Sample #, RMP, VThresh, QC pass/fail — useful for at-a-glance cohort health checks. |
+| `PASSED Results_<timestamp>/PASSED Results_<timestamp>.xlsx` | PASSED samples only, with one tab per protocol plus a `Fully Compiled` master tab. |
+| `REJECTED Results_<timestamp>/REJECTED Results_<timestamp>.xlsx` | Every user-rejected, auto-rejected, or failed analysis. Rows identify `USER`, `AUTO`, or `FAILED TO ANALYZE` and include the source path and processing error. |
+| `FULLY COMPILED Results_<timestamp>/FULLY COMPILED Results_<timestamp>.xlsx` | The PASSED and REJECTED workbooks merged tab-for-tab and sorted by Sample #. Passed rows have blank reject metadata. |
+| `Ri-Ih Contaminated Sweeps_<timestamp>/Ri-Ih Contaminated Sweeps_<timestamp>.xlsx` | Ri/Ih sweeps with an AP in the baseline or steady-state measurement window. |
+| `Trimming Analysis_<timestamp>/Trimming Analysis_<timestamp>.xlsx` | Flat Sample #, RMP, VThresh, and QC status summary. |
 
-PASSED and REJECTED are kept as separate workbooks (not intermingled) so the two cohorts can be compared side-by-side. Per-sample metrics are computed for rejected samples too — the QC gate only decides which workbook a sample lands in, not whether its numbers are calculated.
+PASSED and REJECTED remain separate for cohort comparison, and FULLY COMPILED provides their direct union. Per-sample metrics are computed for rejected samples too; review status decides workbook placement, not whether the numbers are calculated.
 
 ---
 
@@ -75,9 +103,23 @@ PASSED and REJECTED are kept as separate workbooks (not intermingled) so the two
 
 All measurements use Clampfit's numerical conventions so values match what the lab would compute by hand.
 
+### Baseline QC (detailed analysis only)
+
+For each applicable mV recording, the baseline is the mean of the first
+200 ms of every sweep. EPSCs and membrane-test files are excluded. The target
+is `-67 mV` for all applicable protocols except 5- and 25-spike AHP, which use
+`-60 mV`. A file is flagged when either:
+
+- Any sweep baseline is more than 10 mV above or below its target.
+- At least three pairs of adjacent sweeps differ by 4 mV or more.
+
+Baseline flags never reject a recording automatically. Detailed analysis waits
+for an explicit Accept or Reject decision for every flagged file, then excludes
+the rejected recordings before protocol analysis begins.
+
 ### RMP
 
-Mean voltage over the first 200 ms of the 15 s gap-free recording.
+The reported RMP is the average of three 200 ms voltage means: the first 200 ms, a 200 ms window centered in the recording, and the final 200 ms.
 
 ### Input Resistance (Ri, MOhm)
 
@@ -95,7 +137,7 @@ Linear regression of response steady-state mV against measured-stimulus steady-s
 
 ### Contaminated Sweep Detection
 
-Any Ri/Ih sweep whose baseline or steady-state window contains a spike (voltage peak ≥ 15 mV above 0 mV) is excluded from Ri and sag calculations and written to `Ri-Ih Contaminated Sweeps/results.xlsx` for inspection.
+Any Ri/Ih sweep whose baseline or steady-state window contains a spike (voltage peak ≥ 15 mV above 0 mV) is excluded from Ri and sag calculations and written to the timestamped `Ri-Ih Contaminated Sweeps_<timestamp>` workbook for inspection.
 
 ### Voltage Threshold (AP fine)
 
@@ -112,10 +154,10 @@ All measured within the AP window (t = 0.29–0.31 s) on the first-firing sweep:
 
 ### Current Threshold (Ithresh)
 
-Reported as three columns: `R1S1 Mean`, `R2S1 Mean`, and `Ithresh = R2S1 − R1S1`, using the measured stimulus signal (channel 1):
+Reported as three columns: `R1S1 Mean`, `R2S1 Mean`, and `Ithresh = R2S1 − R1S1`, using the measured stimulus signal (channel 1). Both cursor endpoints are included:
 
-- **R1S1** = mean stimulus over 0–0.2 s (baseline).
-- **R2S1** = mean stimulus over the AP window (0.29–0.31 s), restricted to samples ≥ 95% of the window's stimulus peak. This isolates the "flat top" of the command pulse and excludes the ramp-up/ramp-down edges. Matches Clampfit's manual-cursor convention.
+- **R1S1** = mean stimulus from 0–0.2 s.
+- **R2S1** = mean stimulus from 0.29695–0.29885 s.
 
 The measured stimulus is used rather than the nominal value because the realised command pulse differs from the programmed amplitude by 5–20 pA.
 
@@ -136,13 +178,32 @@ For each sweep of the 1s AP protocol, spikes are counted using `scipy.signal.fin
 
 **Firing Frequency (Hz)** per sweep = spike count / step duration (1 s by default).
 
-**Hyper-firing rejection**: sweeps with > 50 raw spikes are zeroed in the PASSED output (so summary metrics exclude them) and written to `1s AP Rejected Sweeps/results.xlsx` for the user to judge whether the cell is genuinely hyper-firing or an analysis artefact.
+**Review flags**:
+- **Sudden AP drop**: the current sweep has exactly 1 AP after the preceding sweep had at least 5 APs.
+- **Stimulus baseline**: the mean voltage over the first 200 ms inside the 1-second stimulus step is at or above 0 mV.
+- **High firing**: a sweep has at least 100 APs. The review dialog shows both the 1s AP and Ri/Ih recordings when Ri/Ih is available.
+
+Flags do not blank or remove sweep values. The user chooses whether to keep or remove an otherwise-passed sample during review; removed samples enter the REJECTED workbook with a `USER` flag.
+Detailed analysis presents these flags even when the sample was already rejected
+by the earlier RMP threshold review; the earlier rejection status remains in
+effect.
 
 **Summary columns**:
-- **First FF** — firing frequency of the first sweep that produced spikes.
-- **Max FF** — highest firing frequency across all sweeps.
-- **Ithresh FF** — firing frequency of the 1s AP sweep whose nominal current is closest to the measured Ithresh (from AP fine), within half a step size. Blank if no sweep qualifies — reporting 0 would falsely imply "no firing at Ithresh".
-- **Rheobase SU FF** — firing frequency of the first sweep whose current exceeds rheobase.
+- **First Sweep** — 1-based sweep number of the first sweep with at least one counted AP.
+- **First FF** — spike count divided by stimulus-step duration on First Sweep.
+- **Max FF** — highest firing frequency across all analyzed sweeps.
+- **Ithresh** — measured AP stimulus current from the AP threshold protocol.
+- **Ithresh FF** — firing frequency of the first 1s AP sweep whose nominal current is at or above Ithresh. Blank only when no nominal current reaches Ithresh.
+- **Rheobase SU FF** — firing frequency of the first sweep whose nominal current strictly exceeds rheobase.
+
+### Cell Type
+
+`Cell Type` is included with the shared sample columns in every result tab. A
+sample is classified as `Interneuron` when its 1s AP maximum firing frequency
+is at least 100 Hz. Otherwise, the AP threshold sweep is classified as
+`Regular` when it contains one spike or `Burst` when it contains more than one
+spike. Interneuron classification takes precedence, so classifications are
+mutually exclusive. Half-width is not used for Cell Type classification.
 
 ### AHP (5 / 25 / 50 spike)
 
@@ -164,6 +225,7 @@ Each `.abf` file is identified by its `abf.protocol` string, not by filename. Th
 
 | Protocol | Expected `abf.protocol` |
 |---|---|
+| Spontaneous EPSC preview | `1. Spontaneous EPSCs` |
 | RMP | `2. Resting Membrane Potential` |
 | Ri/Ih | `4. Ih and Input Resistance` |
 | AP coarse (fallback) | `5a. Single AP coarse` |
