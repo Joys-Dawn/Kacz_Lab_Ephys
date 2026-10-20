@@ -28,6 +28,7 @@ def analyze_one_s_ap(
     abf: pyabf.ABF,
     ithresh_pa: float = 0.0,
     rheobase_pa: float = 0.0,
+    excluded_sweeps: set[int] | None = None,
 ) -> OneSAPResult:
     """Analyze 1s AP firing protocol.
 
@@ -47,6 +48,7 @@ def analyze_one_s_ap(
     i_start = time_to_index(step_onset, rate)
     i_end = time_to_index(step_onset + step_duration, rate)
 
+    excluded_sweeps = excluded_sweeps or set()
     sweeps = []
     first_ff = 0.0
     max_ff = 0.0
@@ -93,6 +95,7 @@ def analyze_one_s_ap(
             stimulus_baseline_mv=stimulus_baseline_mv,
             sudden_drop=sudden_drop,
             flagged_high_firing=flagged_high_firing,
+            excluded=sweep_idx + 1 in excluded_sweeps,
         ))
 
         sweep_num = sweep_idx + 1
@@ -102,6 +105,10 @@ def analyze_one_s_ap(
             baseline_at_or_above_zero_sweeps.append(sweep_num)
         if flagged_high_firing:
             high_firing_sweeps.append(sweep_num)
+
+        previous_spike_count = raw_spike_count
+        if sweep_num in excluded_sweeps:
+            continue
 
         if spike_count and first_sweep == -1:
             first_sweep = sweep_idx
@@ -114,15 +121,14 @@ def analyze_one_s_ap(
             rheobase_su_ff = ff
             rheobase_su_found = True
 
-        previous_spike_count = raw_spike_count
-
     # Ithresh FF: FF at the first 1s AP sweep whose nominal current is at or
     # above AP fine's measured Ithresh. None leaves the export blank when no
     # nominal current reaches Ithresh.
     ithresh_ff: float | None = None
     if ithresh_pa > 0:
         threshold_idx = next(
-            (i for i, current in enumerate(currents) if current >= ithresh_pa),
+            (i for i, current in enumerate(currents)
+             if current >= ithresh_pa and i + 1 not in excluded_sweeps),
             None,
         )
         if threshold_idx is not None:

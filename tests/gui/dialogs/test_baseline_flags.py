@@ -79,6 +79,32 @@ def test_long_list_scrolls_inside_bounded_dialog(qtbot):
     assert dialog.table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
 
 
+def test_narrow_window_keeps_reasons_and_controls_in_view(qtbot):
+    dialog = BaselineReviewDialog([(str(1500 + i), _flag(i)) for i in range(80)])
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    for width in (740, 1100, 700):
+        dialog.resize(width, 650)
+        dialog.table.setColumnWidth(1, 160)
+        dialog.table.setColumnWidth(2, 160)
+        qtbot.wait(30)
+
+        assert dialog.table.horizontalScrollBar().maximum() == 0
+        assert dialog.table.columnWidth(3) >= 140
+        assert dialog.table.columnWidth(4) == 210
+        assert dialog.table.columnWidth(5) == 90
+        first = dialog.table.visualItemRect(dialog.table.topLevelItem(0))
+        second = dialog.table.visualItemRect(dialog.table.topLevelItem(1))
+        assert first.bottom() < second.top()
+
+    dialog.resize(1100, 650)
+    qtbot.wait(30)
+    dialog.table.setColumnWidth(1, 240)
+    qtbot.wait(30)
+    assert dialog.table.columnWidth(1) == 240
+
+
 def test_each_file_requires_an_explicit_decision(qtbot):
     first = _flag(1)
     second = _flag(2)
@@ -131,3 +157,20 @@ def test_preview_plots_every_sweep(qtbot, monkeypatch):
     dialog._preview(Path(flag.file_path))
 
     assert plotted == [(Path(flag.file_path), None)]
+
+
+def test_bulk_decisions_respect_deselection_and_allow_correction(qtbot):
+    flags = [(str(i), _flag(i)) for i in range(3)]
+    dialog = BaselineReviewDialog(flags)
+    qtbot.addWidget(dialog)
+    dialog._select_all()
+    dialog.table.topLevelItem(1).setCheckState(0, Qt.Unchecked)
+    dialog._decide_selected(True)
+    assert dialog.decisions == {flags[i][1].file_path: True for i in (0, 2)}
+    assert not dialog.continue_button.isEnabled()
+    dialog._select_all()
+    dialog._decide_selected(False)
+    assert dialog.decisions == {flag.file_path: False for _, flag in flags}
+    assert dialog.continue_button.isEnabled()
+    dialog._decision_radios[flags[1][1].file_path][0].click()
+    assert dialog.decisions[flags[1][1].file_path] is True

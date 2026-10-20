@@ -3,6 +3,8 @@ from ephys_analysis.core.types import OneSAPResult, OneSAPSweep
 from ephys_analysis.gui.dialogs.one_s_ap_review import OneSAPReviewDialog
 from ephys_analysis.protocols import PROTO_1S_AP, PROTO_RI_IH
 from ephys_analysis.protocols.one_s_ap import analyze_one_s_ap
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QPushButton
 
 
 def _drop_result() -> OneSAPResult:
@@ -99,3 +101,32 @@ class TestOneSAPReviewDialog:
         qtbot.addWidget(dlg)
 
         assert dlg.notes == "Review note"
+
+
+def test_sweep_selection_uses_original_numbers_and_updates_plot(qtbot, abf_1s_ap):
+    result = analyze_one_s_ap(load_abf(abf_1s_ap))
+    dialog = OneSAPReviewDialog("1666", {PROTO_1S_AP: str(abf_1s_ap)}, result)
+    qtbot.addWidget(dialog)
+    dialog.sweep_table.topLevelItem(2).setCheckState(0, Qt.Unchecked)
+    assert dialog.excluded_sweeps == {3}
+    assert not dialog.one_s_viewer.ax.lines[2].get_visible()
+    dialog.sweep_table.topLevelItem(2).setCheckState(0, Qt.Checked)
+    assert dialog.excluded_sweeps == set()
+    assert dialog.one_s_viewer.ax.lines[2].get_visible()
+    labels = [button.text() for button in dialog.findChildren(QPushButton)]
+    assert "Remove Sample" not in labels
+    assert "Remove 1s AP Recording" in labels
+
+
+def test_hover_identifies_only_included_sweeps(qtbot, abf_1s_ap):
+    result = analyze_one_s_ap(load_abf(abf_1s_ap))
+    dialog = OneSAPReviewDialog("1666", {PROTO_1S_AP: str(abf_1s_ap)}, result)
+    qtbot.addWidget(dialog)
+    for row in range(dialog.sweep_table.topLevelItemCount()):
+        dialog.sweep_table.topLevelItem(row).setCheckState(
+            0, Qt.Checked if row == 1 else Qt.Unchecked,
+        )
+
+    assert dialog.one_s_viewer.ax.format_coord(0.01215, -67.993).startswith("Sweep 2 ")
+    dialog.sweep_table.topLevelItem(1).setCheckState(0, Qt.Unchecked)
+    assert "Sweep" not in dialog.one_s_viewer.ax.format_coord(0.01215, -67.993)

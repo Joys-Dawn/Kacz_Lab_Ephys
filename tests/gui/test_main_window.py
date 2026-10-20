@@ -7,6 +7,7 @@ needed.
 """
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
@@ -17,6 +18,134 @@ from ephys_analysis.core.types import (
 from ephys_analysis.gui import main_window as mw_module
 from ephys_analysis.gui.main_window import AnalysisWorker, MainWindow
 from ephys_analysis.io.scanner import SampleInfo
+
+
+@pytest.mark.parametrize("decision", [True, False, "cancel"])
+def test_rin_review_routes_decision_to_worker(qtbot, monkeypatch, decision):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    calls = []
+    win._worker = SimpleNamespace(
+        set_ri_ih_result=lambda value: calls.append(value),
+        cancel=lambda: calls.append("cancel"),
+    )
+    monkeypatch.setattr(mw_module, "RiIhReviewDialog", lambda *a: SimpleNamespace(
+        exec=lambda: None, accepted_result=decision,
+    ))
+    win._on_ri_ih_review_needed("1", "rin.abf", [])
+    assert calls == [decision]
+
+
+def test_worker_waits_for_rin_review(qtbot, monkeypatch):
+    captured = []
+
+    def analyze(samples, nominal, ri_ih_reviewer, **kwargs):
+        captured.append(ri_ih_reviewer("1", "rin.abf", []))
+        return []
+
+    monkeypatch.setattr(mw_module, "analyze_all", analyze)
+    worker = AnalysisWorker({}, {})
+    worker.ri_ih_review_needed.connect(lambda *args: worker.set_ri_ih_result(False))
+    with qtbot.waitSignal(worker.finished, timeout=2000):
+        worker.start()
+    worker.wait(2000)
+    assert captured == [False]
+
+
+def test_qc_back_action_is_forwarded(qtbot, monkeypatch):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    reviews = []
+    win._worker = SimpleNamespace(set_qc_result=reviews.append)
+    monkeypatch.setattr(mw_module, "QCReviewDialog", lambda *a, **kw: SimpleNamespace(
+        exec=lambda: None, notes="", accepted_result="back",
+    ))
+    win._on_qc_needed("1", "ap.abf", _make_ap_result(), -65, {}, True)
+    assert reviews[0].go_back is True
+    assert win._qc_reviews == {}
+
+
+@pytest.mark.parametrize("decision", [True, False, "cancel"])
+def test_undo_qc_after_completion_preserves_protocol_results(
+    qtbot, monkeypatch, passed_sample_result, decision,
+):
+    from ephys_analysis.core.types import QCReview
+    win = MainWindow()
+    qtbot.addWidget(win)
+    path = str(Path("C:/data/ap.abf"))
+    result = passed_sample_result
+    result.qc_status = QCStatus.USER_REJECTED_VTHRESH
+    result.file_path = path
+    result.reject_sweep_num = 1
+    win._analysis_samples = {("animalA", "1666"): SampleInfo(
+        "animalA", "1666", protocols={"AP": Path(path)},
+    )}
+    win._qc_contexts[path] = ("1666", _make_ap_result(), -65, {"AP": path})
+    win._qc_reviews[path] = QCReview(False)
+    win._on_analysis_finished([result])
+    assert win._undo_qc_btn.isEnabled()
+    protocol_result = result.one_s_ap
+    monkeypatch.setattr(mw_module, "QCReviewDialog", lambda *a, **kw: SimpleNamespace(
+        exec=lambda: None, notes="corrected", accepted_result=decision,
+        override_vthresh_mv=-40, override_auto_reject=False,
+    ))
+    win._undo_qc()
+    assert result.one_s_ap is protocol_result
+    assert result.qc_status == (QCStatus.PASSED if decision is True else QCStatus.USER_REJECTED_VTHRESH)
+    if decision != "cancel":
+        assert result.ap_fine.voltage_threshold_mv == -40
+        assert "corrected" in result.notes
+    if decision is True:
+        assert result.file_path == "" and result.reject_sweep_num is None
+
+
+def test_threaded_analysis_can_backtrack_and_finish(qtbot, monkeypatch, sample_data_root):
+    from ephys_analysis.io.scanner import scan_project_folder
+    all_samples = scan_project_folder(sample_data_root).samples
+    samples = {}
+    for sid in ("1666", "1542"):
+        key = next(key for key in all_samples if key[1] == sid)
+        samples[key] = all_samples[key]
+    decisions = iter([False, "back", True, True])
+    visited = []
+
+    class Review:
+        def __init__(self, sid, *args, **kwargs):
+            visited.append((sid, kwargs["can_go_back"]))
+            self.accepted_result = next(decisions)
+            self.notes = "Reviewed"
+            self.override_vthresh_mv = None
+            self.override_auto_reject = (
+                self.accepted_result is True and kwargs["auto_rejected"]
+            )
+
+        def exec(self):
+            return 1
+
+    monkeypatch.setattr(mw_module, "QCReviewDialog", Review)
+    monkeypatch.setattr(mw_module, "BaselineReviewDialog", lambda flags, *a: SimpleNamespace(
+        exec=lambda: 1, decisions={flag.file_path: True for _, flag in flags},
+    ))
+    monkeypatch.setattr(mw_module, "OneSAPReviewDialog", lambda *a, **kw: SimpleNamespace(
+        exec=lambda: 1, accepted_result=True, notes="", excluded_sweeps=set(),
+    ))
+    monkeypatch.setattr(mw_module, "RiIhReviewDialog", lambda *a: SimpleNamespace(
+        exec=lambda: 1, accepted_result=True,
+    ))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a: None)
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win._start_analysis(samples, skip_qc=False)
+    worker = win._worker
+    try:
+        qtbot.waitUntil(lambda: len(win.results) == 2, timeout=15000)
+    finally:
+        if worker.isRunning():
+            worker.cancel()
+        worker.wait(2000)
+    assert visited == [("1666", False), ("1542", True), ("1666", False), ("1542", True)]
+    assert all(result.qc_status == QCStatus.PASSED for result in win.results)
+    assert win._undo_qc_btn.isEnabled()
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +566,7 @@ class TestExportResults:
         called = []
         for fn in [
             "export_passed", "export_rejected",
-            "export_fully_compiled",
+            "export_fully_compiled", "export_cell_types",
             "export_ri_ih_contaminated_sweeps",
             "export_trimming_analysis",
         ]:
@@ -448,7 +577,7 @@ class TestExportResults:
 
         assert set(called) == {
             "export_passed", "export_rejected",
-            "export_fully_compiled",
+            "export_fully_compiled", "export_cell_types",
             "export_ri_ih_contaminated_sweeps",
             "export_trimming_analysis",
         }
@@ -483,6 +612,7 @@ class TestExportResults:
         timestamps = []
         for fn in [
             "export_passed", "export_rejected", "export_fully_compiled",
+            "export_cell_types",
             "export_ri_ih_contaminated_sweeps",
             "export_trimming_analysis",
         ]:
@@ -494,7 +624,7 @@ class TestExportResults:
 
         win._export_results()
 
-        assert timestamps == ["20260714_153000"] * 5
+        assert timestamps == ["20260714_153000"] * 6
 
     def test_notes_edited_after_analysis_are_refreshed_before_export(
         self, qtbot, monkeypatch, tmp_path, fake_scan_result, passed_sample_result,
@@ -515,6 +645,7 @@ class TestExportResults:
         monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: None)
         for fn in [
             "export_passed", "export_rejected", "export_fully_compiled",
+            "export_cell_types",
             "export_ri_ih_contaminated_sweeps",
             "export_trimming_analysis",
         ]:
@@ -803,6 +934,7 @@ class TestAnalysisWorker:
         assert captured["qc_reviewer"] is None
         assert captured["one_s_ap_reviewer"] is None
         assert captured["baseline_reviewer"] is None
+        assert captured["ri_ih_reviewer"] is None
 
     def test_baseline_review_waits_for_main_thread_decisions(
         self, qtbot, monkeypatch, passed_sample_result,

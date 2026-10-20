@@ -5,6 +5,25 @@ from PySide6.QtWidgets import QLabel, QPushButton
 from ephys_analysis.gui.dialogs.qc_review import QCReviewDialog
 
 
+def test_back_and_prior_threshold_selection(qtbot, abf_ap_fine, ap_fine_result):
+    from ephys_analysis.core.types import QCReview
+    first = QCReviewDialog("1", str(abf_ap_fine), ap_fine_result, -65)
+    qtbot.addWidget(first)
+    assert not first.back_button.isEnabled()
+    first.picker.select_index(first.picker.auto_idx + 2)
+    voltage = first.picker.selected_voltage_mv()
+    dialog = QCReviewDialog(
+        "1", str(abf_ap_fine), ap_fine_result, -65,
+        can_go_back=True, initial_review=QCReview(True, voltage),
+    )
+    qtbot.addWidget(dialog)
+    assert dialog.picker.selected_voltage_mv() == voltage
+    assert dialog.picker.toolbar.zoom_axis.count() == 3
+    assert dialog.trace_viewer.toolbar.zoom_axis.count() == 3
+    dialog.back_button.click()
+    assert dialog.accepted_result == "back"
+
+
 class TestQCReviewDialog:
     def test_constructs_with_real_abf(self, qtbot, abf_ap_fine, ap_fine_result):
         dlg = QCReviewDialog("1666", str(abf_ap_fine), ap_fine_result, rmp_mv=-65.0)

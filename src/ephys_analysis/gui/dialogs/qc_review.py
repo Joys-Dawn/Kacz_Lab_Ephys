@@ -3,14 +3,14 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
-    QPushButton, QVBoxLayout, QWidget,
+    QPushButton, QStyle, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import Qt
 
 from ephys_analysis.core.abf_io import (
     load_abf, get_sweep_data, get_sweep_time, get_sampling_rate,
 )
-from ephys_analysis.core.types import APFineResult, DVDT_CRITERION_MV_MS
+from ephys_analysis.core.types import APFineResult, DVDT_CRITERION_MV_MS, QCReview
 from ephys_analysis.gui.widgets.ap_threshold_picker import APThresholdPicker
 from ephys_analysis.gui.widgets.trace_viewer import TraceViewer
 
@@ -38,6 +38,9 @@ class QCReviewDialog(QDialog):
         protocol_paths: dict[str, str] | None = None,
         initial_note: str = "",
         auto_rejected: bool = False,
+        can_go_back: bool = False,
+        initial_review: QCReview | None = None,
+        completed: bool = False,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"QC Review — Sample {sample_id}")
@@ -85,6 +88,7 @@ class QCReviewDialog(QDialog):
         # Plots side-by-side
         plot_layout = QHBoxLayout()
         self.picker = APThresholdPicker(self, figsize=(5, 4))
+        self.picker.toolbar.enable_axis_zoom()
         plot_layout.addWidget(self.picker)
 
         right_panel = QWidget()
@@ -111,6 +115,7 @@ class QCReviewDialog(QDialog):
         right_layout.addLayout(selector_layout)
 
         self.trace_viewer = TraceViewer(self, figsize=(5, 4))
+        self.trace_viewer.toolbar.enable_axis_zoom()
         right_layout.addWidget(self.trace_viewer)
         self.trace_viewer.plot_single(
             self._ap_time,
@@ -160,6 +165,14 @@ class QCReviewDialog(QDialog):
         layout.addWidget(readout)
         self._refresh_readout()
 
+        if initial_review is not None:
+            previous = "Accepted" if initial_review.accepted else "Rejected"
+            layout.addWidget(QLabel(f"Previous decision: {previous}"))
+            if initial_review.override_vthresh_mv is not None:
+                matches = np.flatnonzero(v == initial_review.override_vthresh_mv)
+                if len(matches):
+                    self.picker.select_index(int(matches[0]))
+
         notes_label = QLabel("Notes")
         self.notes_editor = QPlainTextEdit()
         notes_label.setBuddy(self.notes_editor)
@@ -170,6 +183,13 @@ class QCReviewDialog(QDialog):
 
         # Buttons
         btn_layout = QHBoxLayout()
+        self.back_button = QPushButton(
+            self.style().standardIcon(QStyle.SP_ArrowBack), "Back"
+        )
+        self.back_button.setEnabled(can_go_back)
+        self.back_button.setToolTip("Return to the previous sample's QC review")
+        self.back_button.clicked.connect(self._back)
+        btn_layout.addWidget(self.back_button)
         self._accept_btn = QPushButton(
             "Override Auto-Reject" if auto_rejected else "Accept"
         )
@@ -189,7 +209,7 @@ class QCReviewDialog(QDialog):
         reset_btn = QPushButton("Reset to auto-detected")
         reset_btn.setStyleSheet("padding: 8px 16px;")
         reset_btn.clicked.connect(self._reset)
-        cancel_btn = QPushButton("Cancel Analysis")
+        cancel_btn = QPushButton("Cancel Review" if completed else "Cancel Analysis")
         cancel_btn.setStyleSheet("padding: 8px 24px;")
         cancel_btn.clicked.connect(self._cancel)
         btn_layout.addStretch()
@@ -275,4 +295,8 @@ class QCReviewDialog(QDialog):
 
     def _cancel(self):
         self.accepted_result = "cancel"
+        self.reject()
+
+    def _back(self):
+        self.accepted_result = "back"
         self.reject()

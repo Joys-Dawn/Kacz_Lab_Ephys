@@ -183,3 +183,19 @@ class TestHoverReadout:
         readout = viewer.ax.format_coord(2.0, -70.0)
 
         assert "Sweep" not in readout
+
+    def test_hover_ignores_hidden_sweeps_and_restores_visible_ones(self, qtbot):
+        viewer = TraceViewer()
+        qtbot.addWidget(viewer)
+        time = np.linspace(0, 1, 10)
+        viewer.plot_sweeps(time, [np.zeros(10), np.zeros(10)])
+        viewer.ax.axhline(2.0)
+
+        viewer.ax.lines[0].set_visible(False)
+        assert viewer.ax.format_coord(0.5, 0.0).startswith("Sweep 2 ")
+
+        viewer.ax.lines[1].set_visible(False)
+        assert "Sweep" not in viewer.ax.format_coord(0.5, 0.0)
+
+        viewer.ax.lines[0].set_visible(True)
+        assert viewer.ax.format_coord(0.5, 0.0).startswith("Sweep 1 ")

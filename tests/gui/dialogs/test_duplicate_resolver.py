@@ -1,11 +1,21 @@
 from pathlib import Path
-
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QPushButton
 
 from ephys_analysis.gui.dialogs.duplicate_resolver import DuplicateResolverDialog
 
+
+def test_duplicate_preview_does_not_limit_sweeps(qtbot, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "ephys_analysis.gui.dialogs.duplicate_resolver.TraceViewer.plot_abf",
+        lambda self, path, max_sweeps=None: calls.append(max_sweeps),
+    )
+    dialog = DuplicateResolverDialog({})
+    qtbot.addWidget(dialog)
+    dialog._preview(Path("recording.abf"))
+    assert calls == [None]
 
 @pytest.fixture
 def two_duplicate_groups():

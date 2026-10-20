@@ -159,6 +159,8 @@ class APThresholdPicker(PlotCanvas):
         self.threshold_picked.emit(idx)
 
     def _on_pick(self, event):
+        if self.toolbar is not None and self.toolbar.mode:
+            return
         if self._line_v is None or event.artist is not self._line_v:
             return
         ind = getattr(event, "ind", None)

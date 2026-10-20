@@ -60,6 +60,11 @@ def _write_tab(
         _sort_by_sample(pd.DataFrame(rows)).to_excel(
             writer, sheet_name=sheet_name, index=False
         )
+    elif sheet_name == "Fully Compiled":
+        columns = row_builder(SampleResult(sample_id="", animal_id=""))
+        pd.DataFrame(columns=list(columns)).to_excel(
+            writer, sheet_name=sheet_name, index=False
+        )
 
 
 # ---- Shared row builders ---------------------------------------------------
@@ -99,7 +104,8 @@ def _rin_row(s: SampleResult) -> dict | None:
     if not s.ri_ih:
         return None
     row = s.to_common_dict()
-    row["Slope"] = s.ri_ih.input_resistance_mohm / 1000.0
+    ri = s.ri_ih.input_resistance_mohm
+    row["Slope"] = ri / 1000.0 if ri is not None else None
     row["Ri"] = s.ri_ih.input_resistance_mohm
     return row
 
@@ -151,13 +157,14 @@ def _firing_row(s: SampleResult) -> dict | None:
     row["Ithresh FF (Hz)"] = s.one_s_ap.ithresh_ff_hz
     row["Rheobase SU FF (Hz)"] = s.one_s_ap.rheobase_su_ff_hz
     for sw in s.one_s_ap.sweeps:
-        row[f"FF {sw.current_pa:.0f}pA"] = sw.firing_freq_hz
+        row[f"FF {sw.current_pa:.0f}pA"] = None if sw.excluded else sw.firing_freq_hz
     for sw in s.one_s_ap.sweeps:
-        if sw.isi_ms:
-            mean_isi = sum(sw.isi_ms) / len(sw.isi_ms)
-        else:
-            mean_isi = 0.0
-        row[f"ISI {sw.current_pa:.0f}pA"] = mean_isi
+        valid = not sw.excluded and sw.spike_count >= 3 and len(sw.isi_ms) >= 2
+        row[f"First ISI {sw.current_pa:.0f}pA (ms)"] = sw.isi_ms[0] if valid else None
+        row[f"Last ISI {sw.current_pa:.0f}pA (ms)"] = sw.isi_ms[-1] if valid else None
+        row[f"ISI Ratio {sw.current_pa:.0f}pA (first/last)"] = (
+            sw.isi_ms[0] / sw.isi_ms[-1] if valid else None
+        )
     return row
 
 
@@ -186,7 +193,8 @@ def _fully_compiled_row(s: SampleResult) -> dict:
     row["Rheobase SU FF"] = one_s.rheobase_su_ff_hz if one_s else None
     row["200 pA Avg"] = s.ri_ih.sag_ratio_200pa if s.ri_ih else None
     row["100 pA Avg"] = s.ri_ih.sag_ratio_100pa if s.ri_ih else None
-    row["Ri Slope"] = (s.ri_ih.input_resistance_mohm / 1000.0) if s.ri_ih else None
+    ri = s.ri_ih.input_resistance_mohm if s.ri_ih else None
+    row["Ri Slope"] = ri / 1000.0 if ri is not None else None
     row["Ri"] = s.ri_ih.input_resistance_mohm if s.ri_ih else None
     row["AP Source"] = _ap_source(s) if s.ap_fine else None
     row["Sweep"] = s.ap_fine.sweep_num if s.ap_fine else None
@@ -201,7 +209,7 @@ def _fully_compiled_row(s: SampleResult) -> dict:
         row[f"{prefix} sAHP"] = ahp.ms1000_mv if ahp else None
     if one_s:
         for sw in one_s.sweeps:
-            row[f"FF {sw.current_pa:.0f}pA"] = sw.firing_freq_hz
+            row[f"FF {sw.current_pa:.0f}pA"] = None if sw.excluded else sw.firing_freq_hz
     row["First FF"] = one_s.first_ff_hz if one_s else None
     row["Max FF"] = one_s.max_ff_hz if one_s else None
     row["Half-Width (ms)"] = s.ap_fine.half_width_ms if s.ap_fine else None
@@ -292,10 +300,10 @@ def export_passed(
 ) -> Path | None:
     """Export PASSED samples to a timestamped composite workbook."""
     passed = [r for r in results if r.qc_status == QCStatus.PASSED]
-    if not passed:
+    if not results:
         return None
 
-    path = _output_path(output_dir, "PASSED Results", timestamp)
+    path = _output_path(output_dir, "ALL PASSED", timestamp)
 
     with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
         for sheet_name, builder in _COMPOSITE_TABS:
@@ -314,10 +322,10 @@ def export_rejected(
         r for r in results
         if r.qc_status in _REJECTED_STATUSES
     ]
-    if not rejected:
+    if not results:
         return None
 
-    path = _output_path(output_dir, "REJECTED Results", timestamp)
+    path = _output_path(output_dir, "ALL REJECTED", timestamp)
 
     with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
         for sheet_name, builder in _COMPOSITE_TABS:
@@ -335,11 +343,34 @@ def export_fully_compiled(
     if not results:
         return None
 
-    path = _output_path(output_dir, "FULLY COMPILED Results", timestamp)
+    path = _output_path(output_dir, "ALL CELLS (COMPILED)", timestamp)
     with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
         for sheet_name, builder in _COMPOSITE_TABS:
             _write_tab(writer, results, sheet_name, _merged_row(builder))
     return path
+
+
+def export_cell_types(
+    results: list[SampleResult],
+    output_dir: Path,
+    timestamp: str | None = None,
+) -> list[Path]:
+    paths = []
+    for cell_type, label in (
+        ("Regular", "REGULAR SPIKING PASSED"),
+        ("Burst", "BURST SPIKING PASSED"),
+        ("Interneuron", "INTERNEURONS PASSED"),
+    ):
+        samples = [
+            result for result in results
+            if result.qc_status == QCStatus.PASSED and result.cell_type == cell_type
+        ]
+        path = _output_path(output_dir, label, timestamp)
+        with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
+            for sheet_name, builder in _COMPOSITE_TABS:
+                _write_tab(writer, samples, sheet_name, builder)
+        paths.append(path)
+    return paths
 
 
 def export_ri_ih_contaminated_sweeps(
@@ -354,9 +385,10 @@ def export_ri_ih_contaminated_sweeps(
     """
     rows = []
     for s in results:
-        if not s.ri_ih or not s.ri_ih.contaminated_sweeps:
-            continue
-        for c in s.ri_ih.contaminated_sweeps:
+        contaminated = (
+            s.ri_ih.contaminated_sweeps if s.ri_ih else s.ri_ih_contaminated_sweeps
+        )
+        for c in contaminated:
             row = s.to_common_dict()
             row["Sweep #"] = c.sweep_num
             row["Current (pA)"] = c.current_pa

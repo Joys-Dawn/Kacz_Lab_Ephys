@@ -36,6 +36,7 @@ class QCReview:
     override_vthresh_mv: float | None = None
     notes: str | None = None
     override_auto_reject: bool = False
+    go_back: bool = False
 
 
 @dataclass
@@ -60,6 +61,7 @@ class OneSAPReview:
     """User verdict for a flagged 1-second AP recording."""
     accepted: bool
     notes: str | None = None
+    excluded_sweeps: set[int] = field(default_factory=set)  # 1-based
 
 
 @dataclass
@@ -81,10 +83,10 @@ class RiIhContaminatedSweep:
 
 @dataclass
 class RiIhResult:
-    input_resistance_mohm: float
-    sag_amp_mv: float
-    sag_ratio_200pa: float
-    sag_ratio_100pa: float
+    input_resistance_mohm: float | None
+    sag_amp_mv: float | None
+    sag_ratio_200pa: float | None
+    sag_ratio_100pa: float | None
     contaminated_sweeps: list[RiIhContaminatedSweep] = field(default_factory=list)
 
 
@@ -124,6 +126,7 @@ class OneSAPSweep:
     stimulus_baseline_mv: float | None = None
     sudden_drop: bool = False
     flagged_high_firing: bool = False
+    excluded: bool = False
 
 
 @dataclass
@@ -167,6 +170,7 @@ class SampleResult:
     rmp: RMPResult | None = None
     ap_fine: APFineResult | None = None
     ri_ih: RiIhResult | None = None
+    ri_ih_contaminated_sweeps: list[RiIhContaminatedSweep] = field(default_factory=list)
     ramp: RampResult | None = None
     one_s_ap: OneSAPResult | None = None
     ahp_5: AHPResult | None = None

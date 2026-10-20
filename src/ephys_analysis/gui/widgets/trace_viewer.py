@@ -71,8 +71,8 @@ class TraceViewer(PlotCanvas):
             idx -= 1
         best_label = None
         best_dist = float("inf")
-        for label, sweep in zip(self._hover_labels, sweeps, strict=True):
-            if idx >= len(sweep):
+        for i, (label, sweep) in enumerate(zip(self._hover_labels, sweeps, strict=True)):
+            if not self.ax.lines[i].get_visible() or idx >= len(sweep):
                 continue
             d = abs(float(sweep[idx]) - y)
             if d < best_dist:

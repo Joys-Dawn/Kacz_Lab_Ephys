@@ -1,6 +1,35 @@
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backend_bases import MouseButton, MouseEvent
+import pytest
 
 from ephys_analysis.gui.widgets.plot_canvas import PlotCanvas
+
+
+@pytest.mark.parametrize("axis", ["x", "y", None])
+def test_axis_zoom_changes_only_selected_axes(qtbot, axis):
+    widget = PlotCanvas()
+    qtbot.addWidget(widget)
+    widget.toolbar.enable_axis_zoom()
+    widget.toolbar.zoom_axis.setCurrentIndex({None: 0, "x": 1, "y": 2}[axis])
+    widget.ax.set_xlim(0, 10)
+    widget.ax.set_ylim(0, 100)
+    widget.refresh()
+    widget.toolbar.zoom()
+    start = widget.ax.transData.transform((2, 20))
+    end = widget.ax.transData.transform((8, 80))
+    press = MouseEvent("button_press_event", widget.canvas, *start, button=1)
+    motion = MouseEvent(
+        "motion_notify_event", widget.canvas, *end, buttons={MouseButton.LEFT}
+    )
+    release = MouseEvent("button_release_event", widget.canvas, *end, button=1)
+    widget.toolbar.press_zoom(press)
+    widget.toolbar.drag_zoom(motion)
+    widget.toolbar.release_zoom(release)
+    assert widget.ax.get_xlim() == pytest.approx((0, 10) if axis == "y" else (2, 8), abs=0.1)
+    assert widget.ax.get_ylim() == pytest.approx((0, 100) if axis == "x" else (20, 80), abs=0.5)
+    widget.toolbar.home()
+    assert widget.ax.get_xlim() == (0, 10)
+    assert widget.ax.get_ylim() == (0, 100)
 
 
 class TestPlotCanvas:

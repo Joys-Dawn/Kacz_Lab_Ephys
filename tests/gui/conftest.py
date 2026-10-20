@@ -8,7 +8,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import numpy as np
 import pytest
 
 from ephys_analysis.core.types import (

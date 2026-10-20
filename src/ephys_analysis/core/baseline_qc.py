@@ -4,7 +4,7 @@ import pyabf
 from ephys_analysis.core.abf_io import get_sampling_rate, get_sweep_data
 from ephys_analysis.core.signal import time_to_index
 from ephys_analysis.core.types import BaselineFlag
-from ephys_analysis.protocols import PROTO_AHP_5, PROTO_AHP_25
+from ephys_analysis.protocols import PROTO_AHP_5, PROTO_AHP_25, PROTO_RMP
 
 
 BASELINE_DURATION_SEC = 0.2
@@ -54,7 +54,8 @@ def analyze_baseline_qc(
     out_of_range_sweeps = [
         sweep_idx + 1
         for sweep_idx, baseline_mv in enumerate(baseline_means)
-        if abs(baseline_mv - target_mv) > TARGET_TOLERANCE_MV
+        if protocol != PROTO_RMP
+        and abs(baseline_mv - target_mv) > TARGET_TOLERANCE_MV
     ]
     changed_sweep_pairs = [
         (sweep_idx + 1, sweep_idx + 2)

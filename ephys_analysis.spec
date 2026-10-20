@@ -30,6 +30,7 @@ a = Analysis(
         'ephys_analysis.gui.dialogs',
         'ephys_analysis.gui.dialogs.qc_review',
         'ephys_analysis.gui.dialogs.one_s_ap_review',
+        'ephys_analysis.gui.dialogs.ri_ih_review',
         'ephys_analysis.gui.dialogs.baseline_flags',
         'ephys_analysis.gui.dialogs.duplicate_resolver',
         'ephys_analysis.gui.dialogs.nominal_vars',

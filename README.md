@@ -35,7 +35,7 @@ Each sample folder typically contains one `.abf` per protocol. Protocol identity
 
 ## Application Workflow
 
-The GUI has five toolbar actions. Detailed and Quick Analysis are independent
+Detailed and Quick Analysis are independent
 ways to run the loaded project.
 
 ### 1. Open Project Folder
@@ -63,6 +63,8 @@ shown in a scrollable review before protocol analysis continues. Every flagged
 file can be previewed and must be explicitly accepted or rejected. Rejected
 recordings are removed from that sample's protocol set before analysis; the
 sample's other accepted recordings remain available.
+Select All and the per-row checkboxes support bulk Accept Selected or Reject Selected.
+Previews show every sweep, including previews opened from the duplicate resolver.
 
 Every sample with RMP and AP threshold data then appears in VThresh QC. A
 sample whose RMP is more depolarized than its voltage threshold is labeled
@@ -70,6 +72,9 @@ sample whose RMP is more depolarized than its voltage threshold is labeled
 `Override Auto-Reject` to retain the sample.
 
 During VThresh QC, the AP threshold picker stays visible while the adjacent protocol selector can display any other recording from that sample. Notes for the AP source can also be edited in the same dialog.
+Back revisits earlier QC decisions without repeating protocol reviews. After analysis,
+Undo QC can correct the final or an earlier decision; export again to save corrections.
+Both QC plots offer XY, X-only, and Y-only zoom.
 
 ### 4. Quick Analysis
 
@@ -85,17 +90,20 @@ be dismissed to export later from the toolbar.
 
 ### 5. Export Results
 
-Click **Export Results** and pick an output folder. One timestamp is generated for the export and included in every folder and filename. The app writes five things:
+Click **Export Results** and pick an output folder. One timestamp is generated for the export and included in every folder and filename. The app writes six result workbooks plus the existing audit exports:
 
 | Output | Contents |
 |---|---|
-| `PASSED Results_<timestamp>/PASSED Results_<timestamp>.xlsx` | PASSED samples only, with one tab per protocol plus a `Fully Compiled` master tab. |
-| `REJECTED Results_<timestamp>/REJECTED Results_<timestamp>.xlsx` | Every user-rejected, auto-rejected, or failed analysis. Rows identify `USER`, `AUTO`, or `FAILED TO ANALYZE` and include the source path and processing error. |
-| `FULLY COMPILED Results_<timestamp>/FULLY COMPILED Results_<timestamp>.xlsx` | The PASSED and REJECTED workbooks merged tab-for-tab and sorted by Sample #. Passed rows have blank reject metadata. |
+| `ALL PASSED_<timestamp>/ALL PASSED_<timestamp>.xlsx` | PASSED samples only, with one tab per protocol plus a `Fully Compiled` master tab. |
+| `ALL REJECTED_<timestamp>/ALL REJECTED_<timestamp>.xlsx` | Every user-rejected, auto-rejected, or failed analysis. Rows identify `USER`, `AUTO`, or `FAILED TO ANALYZE` and include the source path and processing error. |
+| `ALL CELLS (COMPILED)_<timestamp>/ALL CELLS (COMPILED)_<timestamp>.xlsx` | The PASSED and REJECTED workbooks merged tab-for-tab and sorted by Sample #. Passed rows have blank reject metadata. |
+| `REGULAR SPIKING PASSED_<timestamp>/REGULAR SPIKING PASSED_<timestamp>.xlsx` | Passed Regular cells, with the same protocol tabs. |
+| `BURST SPIKING PASSED_<timestamp>/BURST SPIKING PASSED_<timestamp>.xlsx` | Passed Burst cells, with the same protocol tabs. |
+| `INTERNEURONS PASSED_<timestamp>/INTERNEURONS PASSED_<timestamp>.xlsx` | Passed Interneurons, with the same protocol tabs. |
 | `Ri-Ih Contaminated Sweeps_<timestamp>/Ri-Ih Contaminated Sweeps_<timestamp>.xlsx` | Ri/Ih sweeps with an AP in the baseline or steady-state measurement window. |
 | `Trimming Analysis_<timestamp>/Trimming Analysis_<timestamp>.xlsx` | Flat Sample #, RMP, VThresh, and QC status summary. |
 
-PASSED and REJECTED remain separate for cohort comparison, and FULLY COMPILED provides their direct union. Per-sample metrics are computed for rejected samples too; review status decides workbook placement, not whether the numbers are calculated.
+ALL PASSED and ALL REJECTED remain separate for cohort comparison, and ALL CELLS provides their direct union. Empty groups still receive a workbook with a header-only master tab. Per-sample metrics are computed for rejected samples too; review status decides workbook placement, not whether the numbers are calculated.
 
 ---
 
@@ -110,7 +118,7 @@ For each applicable mV recording, the baseline is the mean of the first
 is `-67 mV` for all applicable protocols except 5- and 25-spike AHP, which use
 `-60 mV`. A file is flagged when either:
 
-- Any sweep baseline is more than 10 mV above or below its target.
+- Any sweep baseline is more than 10 mV above or below its target (not applied to RMP files).
 - At least three pairs of adjacent sweeps differ by 4 mV or more.
 
 Baseline flags never reject a recording automatically. Detailed analysis waits
@@ -138,6 +146,10 @@ Linear regression of response steady-state mV against measured-stimulus steady-s
 ### Contaminated Sweep Detection
 
 Any Ri/Ih sweep whose baseline or steady-state window contains a spike (voltage peak ≥ 15 mV above 0 mV) is excluded from Ri and sag calculations and written to the timestamped `Ri-Ih Contaminated Sweeps_<timestamp>` workbook for inspection.
+In detailed analysis, more than five contaminated sweeps prompt a Keep Recording
+or Remove Recording review. Keeping still excludes contaminated sweeps; removing
+affects only Ri/Ih, not the sample, and preserves the contamination audit.
+If too few clean sweeps remain, uncomputable Rin/Sag measurements are blank.
 
 ### Voltage Threshold (AP fine)
 
@@ -183,7 +195,10 @@ For each sweep of the 1s AP protocol, spikes are counted using `scipy.signal.fin
 - **Stimulus baseline**: the mean voltage over the first 200 ms inside the 1-second stimulus step is at or above 0 mV.
 - **High firing**: a sweep has at least 100 APs. The review dialog shows both the 1s AP and Ri/Ih recordings when Ri/Ih is available.
 
-Flags do not blank or remove sweep values. The user chooses whether to keep or remove an otherwise-passed sample during review; removed samples enter the REJECTED workbook with a `USER` flag.
+Flags do not automatically remove sweep values. The user can exclude individual
+sweeps or remove only the 1s AP recording. Excluded sweeps are blank in exports
+and do not contribute to summary measurements or classification; original sweep
+numbers are preserved. This review never rejects the entire sample.
 Detailed analysis presents these flags even when the sample was already rejected
 by the earlier RMP threshold review; the earlier rejection status remains in
 effect.
@@ -191,10 +206,15 @@ effect.
 **Summary columns**:
 - **First Sweep** — 1-based sweep number of the first sweep with at least one counted AP.
 - **First FF** — spike count divided by stimulus-step duration on First Sweep.
-- **Max FF** — highest firing frequency across all analyzed sweeps.
+- **Max FF** — highest firing frequency across retained sweeps.
 - **Ithresh** — measured AP stimulus current from the AP threshold protocol.
 - **Ithresh FF** — firing frequency of the first 1s AP sweep whose nominal current is at or above Ithresh. Blank only when no nominal current reaches Ithresh.
 - **Rheobase SU FF** — firing frequency of the first sweep whose nominal current strictly exceeds rheobase.
+
+These summaries use retained sweeps. For each retained sweep with at least three
+spikes, the `1s Firing` tab reports the first ISI, last ISI (both in ms), and their
+first/last ratio. Sweeps with fewer than three spikes keep their other measurements
+but have blank ISI columns.
 
 ### Cell Type
 

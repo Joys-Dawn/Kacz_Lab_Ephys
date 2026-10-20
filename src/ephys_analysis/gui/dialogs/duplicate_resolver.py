@@ -78,7 +78,7 @@ class DuplicateResolverDialog(QDialog):
         dialog.setMinimumSize(600, 400)
         layout = QVBoxLayout(dialog)
         viewer = TraceViewer(dialog, figsize=(6, 4))
-        viewer.plot_abf(path, max_sweeps=5)
+        viewer.plot_abf(path)
         layout.addWidget(viewer)
         dialog.show()
 

@@ -1,7 +1,7 @@
 import numpy as np
 
 from ephys_analysis.core.baseline_qc import analyze_baseline_qc
-from ephys_analysis.protocols import PROTO_AHP_5
+from ephys_analysis.protocols import PROTO_AHP_5, PROTO_RMP
 
 
 class FakeABF:
@@ -100,3 +100,15 @@ def test_recording_shorter_than_two_hundred_ms_is_not_applicable():
     result = analyze_baseline_qc(abf, "Short voltage protocol", "short.abf")
 
     assert result is None
+
+
+def test_rmp_has_no_absolute_baseline_range_flag():
+    assert analyze_baseline_qc(FakeABF([-20.0]), PROTO_RMP, "rmp.abf") is None
+
+
+def test_rmp_still_flags_three_successive_baseline_changes():
+    result = analyze_baseline_qc(
+        FakeABF([-50.0, -46.0, -50.0, -46.0]), PROTO_RMP, "rmp.abf"
+    )
+    assert result.out_of_range_sweeps == []
+    assert result.changed_sweep_pairs == [(1, 2), (2, 3), (3, 4)]

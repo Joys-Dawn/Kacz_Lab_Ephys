@@ -17,6 +17,7 @@ from ephys_analysis.core.qc import apply_qc_gate
 from ephys_analysis.core.types import (
     SampleResult, QCStatus, APFineResult, AnalysisCancelled, QCReview,
     OneSAPResult, OneSAPReview, BaselineFlag, BaselineReview,
+    RiIhContaminatedSweep,
 )
 from ephys_analysis.io.scanner import SampleInfo
 from ephys_analysis.protocols import (
@@ -42,6 +43,7 @@ OneSAPReviewer = Callable[
 BaselineReviewer = Callable[
     [list[tuple[str, BaselineFlag]]], "BaselineReview | dict[str, bool]"
 ]
+RiIhReviewer = Callable[[str, str, list[RiIhContaminatedSweep]], bool]
 
 
 def _normalize_review(value) -> QCReview:
@@ -101,6 +103,27 @@ def exclude_protocol_paths(
     }
 
 
+def apply_qc_review(result: SampleResult, ap_path: str, review: QCReview) -> None:
+    """Apply a decision to the original automatic threshold, including on undo."""
+    initial_status = apply_qc_gate(result.rmp.rmp_mv, result.ap_fine.voltage_threshold_mv)
+    if review.override_vthresh_mv is not None:
+        result.ap_fine.voltage_threshold_mv = review.override_vthresh_mv
+    status = apply_qc_gate(result.rmp.rmp_mv, result.ap_fine.voltage_threshold_mv)
+    result.file_path = ""
+    result.reject_sweep_num = None
+    if review.override_auto_reject:
+        result.qc_status = QCStatus.PASSED
+    elif initial_status != QCStatus.PASSED or status != QCStatus.PASSED:
+        result.qc_status = QCStatus.RMP_GT_VTHRESH
+        result.file_path = ap_path
+    elif review.accepted:
+        result.qc_status = QCStatus.PASSED
+    else:
+        result.qc_status = QCStatus.USER_REJECTED_VTHRESH
+        result.file_path = ap_path
+        result.reject_sweep_num = result.ap_fine.sweep_num
+
+
 def analyze_sample(  # noqa: C901
     info: SampleInfo,
     nominal_data: dict[str, dict[str, str]],
@@ -108,6 +131,7 @@ def analyze_sample(  # noqa: C901
     one_s_ap_reviewer: OneSAPReviewer | None = None,
     file_notes: dict[str, str] | None = None,
     skip_qc: bool = False,
+    ri_ih_reviewer: RiIhReviewer | None = None,
 ) -> SampleResult:
     """Run the full analysis pipeline on a single sample.
 
@@ -167,46 +191,15 @@ def analyze_sample(  # noqa: C901
     if skip_qc:
         result.qc_status = QCStatus.PASSED
     elif result.rmp and result.ap_fine:
-        initial_qc_status = apply_qc_gate(
-            result.rmp.rmp_mv, result.ap_fine.voltage_threshold_mv
-        )
-        qc_status = initial_qc_status
-        review = None
+        review = QCReview(accepted=True)
         if qc_reviewer:
             raw = qc_reviewer(
                 info.sample_id, str(ap_path), result.ap_fine, result.rmp.rmp_mv,
             )
             review = _normalize_review(raw)
-        elif qc_status == QCStatus.PASSED:
-            review = QCReview(accepted=True)
-
-        if review is not None:
-            if review.notes is not None and ap_path is not None:
-                _set_file_note(notes_by_path, str(ap_path), review.notes)
-
-            if review.override_vthresh_mv is not None:
-                result.ap_fine.voltage_threshold_mv = review.override_vthresh_mv
-                qc_status = apply_qc_gate(
-                    result.rmp.rmp_mv, result.ap_fine.voltage_threshold_mv,
-                )
-
-            if review.override_auto_reject:
-                result.qc_status = QCStatus.PASSED
-            elif initial_qc_status != QCStatus.PASSED:
-                result.qc_status = QCStatus.RMP_GT_VTHRESH
-                result.file_path = str(ap_path) if ap_path else ""
-            elif qc_status != QCStatus.PASSED:
-                result.qc_status = QCStatus.RMP_GT_VTHRESH
-                result.file_path = str(ap_path) if ap_path else ""
-            elif review.accepted:
-                result.qc_status = QCStatus.PASSED
-            else:
-                result.qc_status = QCStatus.USER_REJECTED_VTHRESH
-                result.file_path = str(ap_path) if ap_path else ""
-                result.reject_sweep_num = result.ap_fine.sweep_num
-        else:
-            result.qc_status = QCStatus.RMP_GT_VTHRESH
-            result.file_path = str(ap_path) if ap_path else ""
+        if review.notes is not None:
+            _set_file_note(notes_by_path, str(ap_path), review.notes)
+        apply_qc_review(result, str(ap_path), review)
     else:
         result.qc_status = QCStatus.RMP_GT_VTHRESH
         result.file_path = str(ap_path) if ap_path else ""
@@ -217,7 +210,17 @@ def analyze_sample(  # noqa: C901
     # whether the per-sample number is computed.
     if PROTO_RI_IH in protocols:
         abf = load_abf(protocols[PROTO_RI_IH])
-        result.ri_ih = analyze_ri_ih(abf)
+
+        def review_contamination(sweeps):
+            result.ri_ih_contaminated_sweeps = sweeps
+            return ri_ih_reviewer(
+                info.sample_id, str(protocols[PROTO_RI_IH]), sweeps
+            )
+
+        if ri_ih_reviewer and not skip_qc:
+            result.ri_ih = analyze_ri_ih(abf, contamination_reviewer=review_contamination)
+        else:
+            result.ri_ih = analyze_ri_ih(abf)
 
     if PROTO_RAMP in protocols:
         abf = load_abf(protocols[PROTO_RAMP])
@@ -244,9 +247,16 @@ def analyze_sample(  # noqa: C901
             one_s_path = str(protocols[PROTO_1S_AP])
             if review.notes is not None:
                 _set_file_note(notes_by_path, one_s_path, review.notes)
-            if not review.accepted and result.qc_status == QCStatus.PASSED:
-                result.qc_status = QCStatus.USER_REJECTED_1S_AP
-                result.file_path = one_s_path
+            if not review.accepted or (
+                result.one_s_ap.sweeps
+                and review.excluded_sweeps == set(range(1, len(result.one_s_ap.sweeps) + 1))
+            ):
+                result.one_s_ap = None
+            elif review.excluded_sweeps:
+                result.one_s_ap = analyze_one_s_ap(
+                    abf, ithresh, rheobase,
+                    excluded_sweeps=review.excluded_sweeps,
+                )
 
     if PROTO_AHP_5 in protocols:
         abf = load_abf(protocols[PROTO_AHP_5])
@@ -274,6 +284,7 @@ def analyze_all(
     file_notes: dict[str, str] | None = None,
     baseline_reviewer: BaselineReviewer | None = None,
     skip_qc: bool = False,
+    ri_ih_reviewer: RiIhReviewer | None = None,
 ) -> list[SampleResult]:
     """Run analysis on all samples with per-sample error handling.
 
@@ -339,6 +350,34 @@ def analyze_all(
                     ).items()
                 )
 
+    # Keep automatic inputs so Back changes QC without repeating protocol reviews.
+    qc_history: list[tuple[int, str, str, APFineResult, float]] = []
+    notes_by_path = file_notes if file_notes is not None else {}
+
+    def review_qc(sample_id, path, ap, rmp):
+        qc_history.append((idx, sample_id, path, replace(ap), rmp))
+        cursor = len(qc_history) - 1
+        while True:
+            sample_index, sid, source, automatic_ap, resting = qc_history[cursor]
+            review = _normalize_review(
+                qc_reviewer(sid, source, replace(automatic_ap), resting)
+            )
+            if review.go_back:
+                if cursor == 0:
+                    raise ValueError("No previous QC review is available")
+                cursor -= 1
+                continue
+            if cursor == len(qc_history) - 1:
+                return review
+            previous = results[sample_index]
+            if previous.qc_status != QCStatus.ANALYSIS_FAILED:
+                previous.ap_fine.voltage_threshold_mv = automatic_ap.voltage_threshold_mv
+                apply_qc_review(previous, source, review)
+            if review.notes is not None:
+                _set_file_note(notes_by_path, source, review.notes)
+                previous.notes = format_sample_notes(items[sample_index][1], notes_by_path)
+            cursor += 1
+
     for idx, ((animal_id, sample_id), info) in enumerate(items):
         if cancel_check and cancel_check():
             break
@@ -350,10 +389,11 @@ def analyze_all(
             result = analyze_sample(
                 info,
                 nominal_data,
-                qc_reviewer=qc_reviewer,
+                qc_reviewer=review_qc if qc_reviewer else None,
                 one_s_ap_reviewer=one_s_ap_reviewer,
-                file_notes=file_notes,
+                file_notes=notes_by_path,
                 skip_qc=skip_qc,
+                ri_ih_reviewer=ri_ih_reviewer,
             )
         except AnalysisCancelled:
             raise

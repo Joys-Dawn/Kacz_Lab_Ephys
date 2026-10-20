@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from ephys_analysis.core.abf_io import load_abf
 from ephys_analysis.protocols.ri_ih import analyze_ri_ih
@@ -116,3 +117,61 @@ class TestContaminationDetection:
         # one point). Without exclusion, the +200 mV pollution on that sweep's
         # ss_sub would skew Ri by tens of MOhm.
         assert abs(result.input_resistance_mohm - ri_clean) < 10.0
+
+
+@pytest.mark.parametrize("count,keep", [(5, True), (6, True), (6, False)])
+def test_contamination_review_threshold_and_decision(abf_ri_ih, count, keep):
+    abf = load_abf(abf_ri_ih)
+    for sweep in range(count):
+        TestContaminationDetection()._inject_ap(abf, sweep, 0.1)
+    calls = []
+
+    def review(sweeps):
+        calls.append(sweeps)
+        return keep
+
+    result = analyze_ri_ih(abf, contamination_reviewer=review)
+    assert len(calls) == (1 if count > 5 else 0)
+    if keep:
+        assert len(result.contaminated_sweeps) == count
+        clean_result = analyze_ri_ih(abf)
+        assert result == clean_result
+    else:
+        assert result is None
+
+
+def test_all_contaminated_sweeps_leave_metrics_unavailable(abf_ri_ih):
+    abf = load_abf(abf_ri_ih)
+    for sweep in range(abf.sweepCount):
+        TestContaminationDetection()._inject_ap(abf, sweep, 0.1)
+    result = analyze_ri_ih(abf, contamination_reviewer=lambda sweeps: True)
+    assert len(result.contaminated_sweeps) == abf.sweepCount
+    assert result.input_resistance_mohm is None
+    assert result.sag_amp_mv is None
+    assert result.sag_ratio_100pa is None
+    assert result.sag_ratio_200pa is None
+
+
+def test_insufficient_rin_points_do_not_discard_available_sag(abf_ri_ih):
+    from ephys_analysis.core.abf_io import reconstruct_currents
+    abf = load_abf(abf_ri_ih)
+    for sweep, current in enumerate(reconstruct_currents(abf, epoch_index=1)):
+        if abs(current) <= 50:
+            TestContaminationDetection()._inject_ap(abf, sweep, 0.1)
+    result = analyze_ri_ih(abf)
+    assert result.input_resistance_mohm is None
+    assert result.sag_amp_mv is not None
+    assert result.sag_ratio_100pa is not None
+    assert result.sag_ratio_200pa is not None
+
+
+def test_undefined_sag_ratio_is_blank_without_substituting_sweeps(abf_ri_ih):
+    from ephys_analysis.core.abf_io import reconstruct_currents
+    abf = load_abf(abf_ri_ih)
+    for sweep, current in enumerate(reconstruct_currents(abf, epoch_index=1)):
+        if abs(current + 100) < 10:
+            start = sweep * abf.sweepPointCount
+            abf.data[0, start:start + abf.sweepPointCount] = -65
+    result = analyze_ri_ih(abf)
+    assert result.sag_ratio_100pa is None
+    assert result.sag_ratio_200pa is not None

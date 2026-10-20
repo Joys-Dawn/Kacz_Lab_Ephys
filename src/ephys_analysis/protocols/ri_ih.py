@@ -1,6 +1,7 @@
 import numpy as np
 import pyabf
 from scipy import stats
+from typing import Callable
 
 from ephys_analysis.core.abf_io import (
     get_sweep_data,
@@ -19,7 +20,10 @@ from ephys_analysis.core.types import RiIhResult, RiIhContaminatedSweep
 CONTAMINATION_PROMINENCE_MV = 15.0
 
 
-def analyze_ri_ih(abf: pyabf.ABF) -> RiIhResult:
+def analyze_ri_ih(
+    abf: pyabf.ABF,
+    contamination_reviewer: Callable[[list[RiIhContaminatedSweep]], bool] | None = None,
+) -> RiIhResult | None:
     """Analyze Ri/Ih protocol for input resistance, sag amplitude, and sag ratio.
 
     Measurements per sweep:
@@ -77,6 +81,12 @@ def analyze_ri_ih(abf: pyabf.ABF) -> RiIhResult:
             ))
 
     contaminated_idx = {c.sweep_num - 1 for c in contaminated_sweeps}
+    if (
+        len(contaminated_sweeps) > 5
+        and contamination_reviewer is not None
+        and not contamination_reviewer(contaminated_sweeps)
+    ):
+        return None
 
     # Baseline-subtracted values
     peak_sub = [pk - bl for pk, bl in zip(peaks, baselines, strict=True)]
@@ -96,27 +106,33 @@ def analyze_ri_ih(abf: pyabf.ABF) -> RiIhResult:
             ri_currents.append(stim_measured_ss_sub[i])
             ri_ss.append(ss_sub[i])
 
-    slope, _, _, _, _ = stats.linregress(ri_currents, ri_ss)
-    input_resistance_mohm = slope * 1000.0  # mV/pA → MOhm
+    input_resistance_mohm = None
+    if len(set(ri_currents)) >= 2:
+        slope, _, _, _, _ = stats.linregress(ri_currents, ri_ss)
+        input_resistance_mohm = slope * 1000.0  # mV/pA → MOhm
 
     # Sag Amplitude: average peak - baseline across most negative current
     # sweeps (excluding contaminated).
     clean_currents = {i: c for i, c in enumerate(currents) if i not in contaminated_idx}
-    most_neg_current = min(clean_currents.values())
-    sag_indices = [
-        i for i, c in clean_currents.items() if abs(c - most_neg_current) < 1.0
-    ]
-    sag_amp_mv = float(np.mean([peak_sub[i] for i in sag_indices]))
+    sag_amp_mv = None
+    if clean_currents:
+        most_neg_current = min(clean_currents.values())
+        sag_indices = [
+            i for i, c in clean_currents.items() if abs(c - most_neg_current) < 1.0
+        ]
+        sag_amp_mv = float(np.mean([peak_sub[i] for i in sag_indices]))
 
     # Sag Ratio: (steady_state - baseline) / (peak - baseline), excluding
     # contaminated sweeps.
-    def _avg_sag_ratio_by_current(target_pa: float, tol: float = 10.0) -> float:
-        ratios = [
-            ss_sub[i] / peak_sub[i]
+    def _avg_sag_ratio_by_current(target_pa: float, tol: float = 10.0) -> float | None:
+        indices = [
+            i
             for i, current in enumerate(currents)
             if i not in contaminated_idx and abs(current - target_pa) < tol
         ]
-        return float(np.mean(ratios))
+        if not indices or any(peak_sub[i] == 0 for i in indices):
+            return None
+        return float(np.mean([ss_sub[i] / peak_sub[i] for i in indices]))
 
     sag_ratio_200pa = _avg_sag_ratio_by_current(-200.0)
     sag_ratio_100pa = _avg_sag_ratio_by_current(-100.0)

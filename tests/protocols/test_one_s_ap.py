@@ -223,3 +223,20 @@ class TestFlaggedSweepsRemainInSummaryMetrics:
 
         assert result.sweeps[6].flagged_high_firing is True
         assert result.ithresh_ff_hz == pytest.approx(100.0)
+
+
+def test_excluded_sweeps_do_not_contribute_to_summary_metrics(abf_1s_ap):
+    abf = load_abf(abf_1s_ap)
+    original = analyze_one_s_ap(abf)
+    excluded = {original.first_sweep + 1, len(original.sweeps)}
+    current = original.sweeps[original.first_sweep].current_pa
+    result = analyze_one_s_ap(abf, current, current - 1, excluded)
+    retained = [(i, sw) for i, sw in enumerate(original.sweeps) if i + 1 not in excluded]
+    first_index, first = next((i, sw) for i, sw in retained if sw.spike_count)
+    assert result.first_sweep == first_index
+    assert result.first_ff_hz == first.firing_freq_hz
+    assert result.max_ff_hz == max(sw.firing_freq_hz for _, sw in retained)
+    assert result.ithresh_ff_hz == next(sw.firing_freq_hz for _, sw in retained if sw.current_pa >= current)
+    assert result.rheobase_su_ff_hz == next(sw.firing_freq_hz for _, sw in retained if sw.current_pa > current - 1)
+    assert [i + 1 for i, sw in enumerate(result.sweeps) if sw.excluded] == sorted(excluded)
+    assert [sw.spike_count for sw in result.sweeps] == [sw.spike_count for sw in original.sweeps]

@@ -121,6 +121,19 @@ class BaselineReviewDialog(QDialog):
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
 
+        bulk_actions = QHBoxLayout()
+        select_all = QPushButton("Select All")
+        select_all.clicked.connect(self._select_all)
+        bulk_actions.addWidget(select_all)
+        for label, accepted in (("Accept Selected", True), ("Reject Selected", False)):
+            button = QPushButton(label)
+            button.clicked.connect(
+                lambda checked=False, keep=accepted: self._decide_selected(keep)
+            )
+            bulk_actions.addWidget(button)
+        bulk_actions.addStretch()
+        layout.addLayout(bulk_actions)
+
         self.table = QTreeWidget()
         self.table.setHeaderLabels(
             ["Sample", "File", "Protocol", "Reason", "Decision", ""]
@@ -145,6 +158,8 @@ class BaselineReviewDialog(QDialog):
                 reason,
             ]
             item = QTreeWidgetItem(values)
+            item.setData(0, Qt.UserRole, flag.file_path)
+            item.setCheckState(0, Qt.Unchecked)
             for column, value in enumerate(values):
                 item.setToolTip(column, value)
             item.setToolTip(3, reason)
@@ -237,6 +252,17 @@ class BaselineReviewDialog(QDialog):
         self.decisions[path] = accepted
         self._update_review_status()
 
+    def _select_all(self):
+        for row in range(self.table.topLevelItemCount()):
+            self.table.topLevelItem(row).setCheckState(0, Qt.Checked)
+
+    def _decide_selected(self, accepted: bool):
+        for row in range(self.table.topLevelItemCount()):
+            item = self.table.topLevelItem(row)
+            if item.checkState(0) == Qt.Checked:
+                radios = self._decision_radios[item.data(0, Qt.UserRole)]
+                radios[0 if accepted else 1].setChecked(True)
+
     def _update_review_status(self):
         decided = len(self.decisions)
         total = len(self._decision_radios)
@@ -244,7 +270,19 @@ class BaselineReviewDialog(QDialog):
         self.continue_button.setEnabled(decided == total)
 
     def _schedule_row_layout(self, *args):
-        QTimer.singleShot(0, self.table.doItemsLayout)
+        QTimer.singleShot(0, self._layout_rows)
+
+    def _layout_rows(self):
+        # Keep room for wrapped reasons when the window or columns get narrower.
+        fixed_width = sum(self.table.columnWidth(column) for column in (0, 4, 5))
+        available = self.table.viewport().width() - fixed_width - 140
+        widths = [self.table.columnWidth(column) for column in (1, 2)]
+        total = sum(widths)
+        if total > available:
+            minimum = self.table.header().minimumSectionSize()
+            for column, width in zip((1, 2), widths, strict=True):
+                self.table.setColumnWidth(column, max(minimum, width * available // total))
+        self.table.doItemsLayout()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

@@ -1,14 +1,88 @@
 import pandas as pd
+import pytest
 from ephys_analysis.core.types import (
     SampleResult, QCStatus, RMPResult, APFineResult,
     RiIhResult, RampResult, AHPResult, OneSAPResult, OneSAPSweep,
     RiIhContaminatedSweep,
 )
 from ephys_analysis.io.excel_export import (
-    export_passed, export_rejected, export_fully_compiled,
+    export_passed, export_rejected, export_fully_compiled, export_cell_types,
     export_trimming_analysis,
     export_ri_ih_contaminated_sweeps,
 )
+
+
+def test_six_workbooks_partition_passed_types_and_sort_all_cells(tmp_path):
+    regular = _make_passed_sample("10")
+    burst = _make_passed_sample("2")
+    burst.ap_fine.spike_num = 2
+    interneuron = _make_passed_sample("20")
+    interneuron.ap_fine.spike_num = 2
+    interneuron.one_s_ap.max_ff_hz = 100
+    rejected = _make_rejected_sample("3")
+    unclassified = SampleResult("5", "animal")
+    results = [regular, interneuron, rejected, burst, unclassified]
+    timestamp = "batch"
+    paths = [
+        export_fully_compiled(results, tmp_path, timestamp),
+        export_rejected(results, tmp_path, timestamp),
+        export_passed(results, tmp_path, timestamp),
+        *export_cell_types(results, tmp_path, timestamp),
+    ]
+    expected = [
+        ("ALL CELLS (COMPILED)", [2, 3, 5, 10, 20]),
+        ("ALL REJECTED", [3]), ("ALL PASSED", [2, 5, 10, 20]),
+        ("REGULAR SPIKING PASSED", [10]), ("BURST SPIKING PASSED", [2]),
+        ("INTERNEURONS PASSED", [20]),
+    ]
+    for path, (label, ids) in zip(paths, expected, strict=True):
+        assert path.name == f"{label}_batch.xlsx"
+        assert pd.read_excel(path, sheet_name="Fully Compiled")["Sample #"].tolist() == ids
+
+
+@pytest.mark.parametrize("spikes,intervals,expected", [
+    (0, [], (None, None, None)), (1, [], (None, None, None)),
+    (2, [10], (None, None, None)), (3, [10, 20], (10, 20, 0.5)),
+    (4, [10, 99, 40], (10, 40, 0.25)),
+])
+def test_isi_uses_end_pairs_only(tmp_path, spikes, intervals, expected):
+    sample = _make_passed_sample()
+    sample.one_s_ap.sweeps = [OneSAPSweep(50, spikes, spikes, isi_ms=intervals)]
+    path = export_passed([sample], tmp_path)
+    row = pd.read_excel(path, sheet_name="1s Firing").iloc[0]
+    columns = ["First ISI 50pA (ms)", "Last ISI 50pA (ms)", "ISI Ratio 50pA (first/last)"]
+    for column, value in zip(columns, expected, strict=True):
+        assert pd.isna(row[column]) if value is None else row[column] == value
+    assert row["FF 50pA"] == spikes
+
+
+def test_excluded_sweep_is_blank_in_both_firing_and_compiled_exports(tmp_path):
+    sample = _make_passed_sample()
+    sample.one_s_ap.sweeps[1].excluded = True
+    path = export_passed([sample], tmp_path)
+    for tab in ("Fully Compiled", "1s Firing"):
+        assert pd.isna(pd.read_excel(path, sheet_name=tab)["FF 50pA"].iloc[0])
+    row = pd.read_excel(path, sheet_name="1s Firing").iloc[0]
+    assert pd.isna(row["First ISI 50pA (ms)"])
+
+
+def test_empty_type_groups_still_have_readable_workbooks(tmp_path):
+    paths = export_cell_types([_make_rejected_sample()], tmp_path)
+    assert len(paths) == 3
+    for path in paths:
+        frame = pd.read_excel(path, sheet_name="Fully Compiled")
+        assert frame.empty and "Sample #" in frame.columns
+
+
+def test_unavailable_rin_exports_blank_and_removed_recording_keeps_audit(tmp_path):
+    sample = _make_passed_sample()
+    sample.ri_ih = RiIhResult(None, None, None, None)
+    path = export_passed([sample], tmp_path)
+    assert pd.read_excel(path, sheet_name="Rin")[["Slope", "Ri"]].isna().all().all()
+    sample.ri_ih = None
+    sample.ri_ih_contaminated_sweeps = [RiIhContaminatedSweep(3, 50, True, False)]
+    audit = export_ri_ih_contaminated_sweeps([sample], tmp_path)
+    assert pd.read_excel(audit)["Sweep #"].tolist() == [3]
 
 
 def _make_passed_sample(sample_id="1666") -> SampleResult:
@@ -67,8 +141,8 @@ class TestExportPassed:
             timestamp="20260714_153000",
         )
 
-        assert path.parent.name == "PASSED Results_20260714_153000"
-        assert path.name == "PASSED Results_20260714_153000.xlsx"
+        assert path.parent.name == "ALL PASSED_20260714_153000"
+        assert path.name == "ALL PASSED_20260714_153000.xlsx"
 
     def test_has_one_tab_per_protocol(self, tmp_path):
         results = [_make_passed_sample()]
@@ -203,7 +277,7 @@ class TestExportPassed:
 
         assert "FLAG" not in df.columns
 
-    def test_returns_none_when_no_passed_samples(self, tmp_path):
+    def test_creates_empty_workbook_when_no_passed_samples(self, tmp_path):
         user_rejected = SampleResult(
             sample_id="1667", animal_id="64280",
             qc_status=QCStatus.USER_REJECTED_VTHRESH, file_path="x.abf",
@@ -211,7 +285,7 @@ class TestExportPassed:
 
         result = export_passed([user_rejected], tmp_path)
 
-        assert result is None
+        assert pd.read_excel(result, sheet_name="Fully Compiled").empty
 
 
 def _make_rejected_sample(
@@ -232,12 +306,12 @@ class TestExportRejected:
 
         assert result is None
 
-    def test_no_rejected_samples_returns_none(self, tmp_path):
+    def test_no_rejected_samples_creates_empty_workbook(self, tmp_path):
         passed_sample = _make_passed_sample()
 
         result = export_rejected([passed_sample], tmp_path)
 
-        assert result is None
+        assert pd.read_excel(result, sheet_name="Fully Compiled").empty
 
     def test_writes_file_to_rejected_subdir(self, tmp_path):
         s = _make_rejected_sample()
@@ -246,15 +320,15 @@ class TestExportRejected:
 
         assert path is not None
         assert path.exists()
-        assert path.parent.name.startswith("REJECTED Results_")
+        assert path.parent.name.startswith("ALL REJECTED_")
 
     def test_folder_and_file_include_same_timestamp(self, tmp_path):
         s = _make_rejected_sample()
 
         path = export_rejected([s], tmp_path, timestamp="20260714_153000")
 
-        assert path.parent.name == "REJECTED Results_20260714_153000"
-        assert path.name == "REJECTED Results_20260714_153000.xlsx"
+        assert path.parent.name == "ALL REJECTED_20260714_153000"
+        assert path.name == "ALL REJECTED_20260714_153000.xlsx"
 
     def test_has_same_tab_structure_as_passed(self, tmp_path):
         rejected = _make_rejected_sample()
@@ -427,8 +501,8 @@ class TestExportFullyCompiled:
             timestamp="20260714_153000",
         )
 
-        assert path.parent.name == "FULLY COMPILED Results_20260714_153000"
-        assert path.name == "FULLY COMPILED Results_20260714_153000.xlsx"
+        assert path.parent.name == "ALL CELLS (COMPILED)_20260714_153000"
+        assert path.name == "ALL CELLS (COMPILED)_20260714_153000.xlsx"
 
     def test_returns_none_for_no_results(self, tmp_path):
         assert export_fully_compiled([], tmp_path) is None
@@ -520,7 +594,9 @@ class TestFlaggedSweepValuesArePreserved:
         path = export_passed([sample], tmp_path)
         df = pd.read_excel(str(path), sheet_name="1s Firing")
 
-        assert df["ISI 900pA"].iloc[0] == 9.0
+        assert df["First ISI 900pA (ms)"].iloc[0] == 8.0
+        assert df["Last ISI 900pA (ms)"].iloc[0] == 10.0
+        assert df["ISI Ratio 900pA (first/last)"].iloc[0] == 0.8
 
     def test_fully_compiled_per_sweep_ff_remains_numeric(self, tmp_path):
         sample = _make_passed_sample()

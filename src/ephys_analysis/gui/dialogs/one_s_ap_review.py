@@ -5,6 +5,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
 )
 
@@ -95,6 +97,20 @@ class OneSAPReviewDialog(QDialog):
             self.setMinimumWidth(1200)
         layout.addLayout(plots)
 
+        self.sweep_table = QTreeWidget()
+        self.sweep_table.setHeaderLabels(["Include sweep", "Current (pA)", "APs", "FF (Hz)"])
+        self.sweep_table.setRootIsDecorated(False)
+        self.sweep_table.setMaximumHeight(180)
+        for number, sweep in enumerate(result.sweeps, start=1):
+            item = QTreeWidgetItem([
+                str(number), f"{sweep.current_pa:g}", str(sweep.spike_count),
+                f"{sweep.firing_freq_hz:g}",
+            ])
+            item.setCheckState(0, Qt.Unchecked if sweep.excluded else Qt.Checked)
+            self.sweep_table.addTopLevelItem(item)
+        self.sweep_table.itemChanged.connect(self._update_sweep_visibility)
+        layout.addWidget(self.sweep_table)
+
         notes_label = QLabel("Notes")
         self.notes_editor = QPlainTextEdit()
         notes_label.setBuddy(self.notes_editor)
@@ -104,9 +120,9 @@ class OneSAPReviewDialog(QDialog):
         layout.addWidget(self.notes_editor)
 
         buttons = QHBoxLayout()
-        keep_btn = QPushButton("Keep Sample")
+        keep_btn = QPushButton("Keep Selected Sweeps")
         keep_btn.clicked.connect(self._keep)
-        remove_btn = QPushButton("Remove Sample")
+        remove_btn = QPushButton("Remove 1s AP Recording")
         remove_btn.clicked.connect(self._remove)
         cancel_btn = QPushButton("Cancel Analysis")
         cancel_btn.clicked.connect(self._cancel)
@@ -120,6 +136,18 @@ class OneSAPReviewDialog(QDialog):
     @property
     def notes(self) -> str:
         return self.notes_editor.toPlainText().strip()
+
+    @property
+    def excluded_sweeps(self) -> set[int]:
+        return {
+            row + 1 for row in range(self.sweep_table.topLevelItemCount())
+            if self.sweep_table.topLevelItem(row).checkState(0) != Qt.Checked
+        }
+
+    def _update_sweep_visibility(self, item, column):
+        row = self.sweep_table.indexOfTopLevelItem(item)
+        self.one_s_viewer.ax.lines[row].set_visible(item.checkState(0) == Qt.Checked)
+        self.one_s_viewer.refresh()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:

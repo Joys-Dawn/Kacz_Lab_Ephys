@@ -195,6 +195,7 @@ class TestQuickAnalysis:
             nominal_data={},
             qc_reviewer=unexpected_review,
             one_s_ap_reviewer=unexpected_review,
+            ri_ih_reviewer=unexpected_review,
             skip_qc=True,
         )
 
@@ -404,7 +405,7 @@ class TestOneSAPFlagReview:
     def _flagged_result(*args, **kwargs):
         return OneSAPResult(sudden_drop_sweeps=[2])
 
-    def test_remove_marks_sample_user_rejected(
+    def test_remove_excludes_only_one_s_ap_recording(
         self, sample_1666_info, monkeypatch,
     ):
         import ephys_analysis.core.pipeline as pipeline_mod
@@ -421,8 +422,11 @@ class TestOneSAPFlagReview:
             ),
         )
 
-        assert result.qc_status == QCStatus.USER_REJECTED_1S_AP
-        assert result.file_path.endswith("2026_02_04_JCA_0009.abf")
+        assert result.qc_status == QCStatus.PASSED
+        assert result.one_s_ap is None
+        assert result.rmp is not None
+        assert result.ri_ih is not None
+        assert result.file_path == ""
 
     def test_keep_preserves_passed_status(
         self, sample_1666_info, monkeypatch,
@@ -676,3 +680,95 @@ class TestProgressCallback:
         )
 
         assert "1666" in calls[0][1]
+
+
+def test_back_updates_only_prior_qc_without_repeating_protocol_reviews(sample_1666_info, monkeypatch):
+    from ephys_analysis.core import pipeline
+    samples = {
+        ("animal", sid): replace(sample_1666_info, sample_id=sid, animal_id="animal")
+        for sid in ("1", "2", "3")
+    }
+    calls = []
+    decisions = iter([
+        QCReview(False, override_vthresh_mv=-80.0),
+        QCReview(False, go_back=True),
+        QCReview(True, notes="Corrected"),
+        QCReview(False),
+        QCReview(False, go_back=True),
+        QCReview(False, go_back=True),
+        QCReview(True),
+        QCReview(True),
+        QCReview(True),
+    ])
+
+    def review(sid, path, ap, rmp):
+        calls.append(sid)
+        assert ap.voltage_threshold_mv != -80.0
+        return next(decisions)
+
+    monkeypatch.setattr(pipeline, "analyze_one_s_ap", lambda *a, **kw: OneSAPResult(high_firing_sweeps=[1]))
+    one_s_calls = []
+
+    def review_one_s(sid, paths, result):
+        one_s_calls.append(sid)
+        return OneSAPReview(False)
+
+    results = analyze_all(samples, {}, qc_reviewer=review, one_s_ap_reviewer=review_one_s)
+    assert calls == ["1", "2", "1", "2", "3", "2", "1", "2", "3"]
+    assert one_s_calls == ["1", "2", "3"]
+    assert all(result.qc_status == QCStatus.PASSED for result in results)
+    assert all(result.one_s_ap is None for result in results)
+    assert all(result.file_path == "" and result.reject_sweep_num is None for result in results)
+    assert "Corrected" in results[0].notes
+
+
+def test_sweep_selection_reaches_analysis_without_rejecting_sample(sample_1666_info, monkeypatch):
+    from ephys_analysis.core import pipeline
+    from ephys_analysis.core.types import OneSAPSweep
+    calls = []
+
+    def analyze(*args, **kwargs):
+        calls.append(kwargs.get("excluded_sweeps", set()))
+        return OneSAPResult(sweeps=[OneSAPSweep(50, 1, 1), OneSAPSweep(100, 100, 100)], high_firing_sweeps=[2])
+
+    monkeypatch.setattr(pipeline, "analyze_one_s_ap", analyze)
+    result = analyze_sample(sample_1666_info, {}, one_s_ap_reviewer=lambda *a: OneSAPReview(True, excluded_sweeps={2}))
+    assert calls == [set(), {2}]
+    assert result.qc_status == QCStatus.PASSED
+
+
+def test_rin_removal_preserves_sample_and_contamination_audit(sample_1666_info, monkeypatch):
+    from ephys_analysis.core import pipeline
+    from ephys_analysis.core.types import RiIhContaminatedSweep
+    sweeps = [RiIhContaminatedSweep(i, 0, True, False) for i in range(1, 7)]
+    order = []
+
+    def analyze(abf, contamination_reviewer):
+        assert contamination_reviewer(sweeps) is False
+        return None
+
+    monkeypatch.setattr(pipeline, "analyze_ri_ih", analyze)
+    monkeypatch.setattr(pipeline, "analyze_one_s_ap", lambda *a: OneSAPResult(high_firing_sweeps=[1]))
+    result = analyze_sample(
+        sample_1666_info, {},
+        qc_reviewer=lambda *a: order.append("qc") or True,
+        ri_ih_reviewer=lambda *a: order.append("rin") or False,
+        one_s_ap_reviewer=lambda *a: order.append("1s") or True,
+    )
+    assert order == ["qc", "rin", "1s"]
+    assert result.qc_status == QCStatus.PASSED
+    assert result.ri_ih is None
+    assert result.ri_ih_contaminated_sweeps == sweeps
+    assert result.ramp is not None and result.ahp_5 is not None
+
+
+def test_removing_all_one_s_sweeps_keeps_other_protocols(sample_1666_info, monkeypatch):
+    from ephys_analysis.core import pipeline
+    from ephys_analysis.core.types import OneSAPSweep
+    monkeypatch.setattr(pipeline, "analyze_one_s_ap", lambda *a: OneSAPResult(
+        sweeps=[OneSAPSweep(50, 100, 100)], high_firing_sweeps=[1],
+    ))
+    result = analyze_sample(sample_1666_info, {}, one_s_ap_reviewer=lambda *a: OneSAPReview(True, excluded_sweeps={1}))
+    assert result.one_s_ap is None
+    assert result.qc_status == QCStatus.PASSED
+    assert result.ap_fine is not None and result.ri_ih is not None

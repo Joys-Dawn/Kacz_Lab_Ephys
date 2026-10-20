@@ -8,12 +8,12 @@ from PySide6.QtWidgets import (
     QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
     QFileDialog, QTreeWidget, QTreeWidgetItem, QLabel, QProgressBar,
     QPlainTextEdit, QStatusBar, QToolBar, QMessageBox, QSplitter,
-    QAbstractItemView,
+    QAbstractItemView, QStyle,
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
 from ephys_analysis.core.pipeline import (
-    analyze_all, exclude_protocol_paths, format_sample_notes,
+    analyze_all, apply_qc_review, exclude_protocol_paths, format_sample_notes,
 )
 from ephys_analysis.core.types import (
     SampleResult, QCStatus, APFineResult, AnalysisCancelled, QCReview,
@@ -22,13 +22,14 @@ from ephys_analysis.core.types import (
 from ephys_analysis.io.scanner import scan_project_folder, ScanResult, SampleInfo
 from ephys_analysis.io.excel_export import (
     create_export_timestamp, export_passed, export_rejected,
-    export_fully_compiled,
+    export_fully_compiled, export_cell_types,
     export_ri_ih_contaminated_sweeps, export_trimming_analysis,
 )
 from ephys_analysis.gui.widgets.trace_viewer import TraceViewer
 from ephys_analysis.gui.dialogs.baseline_flags import BaselineReviewDialog
 from ephys_analysis.gui.dialogs.qc_review import QCReviewDialog
 from ephys_analysis.gui.dialogs.one_s_ap_review import OneSAPReviewDialog
+from ephys_analysis.gui.dialogs.ri_ih_review import RiIhReviewDialog
 from ephys_analysis.gui.dialogs.duplicate_resolver import DuplicateResolverDialog
 from ephys_analysis.gui.dialogs.nominal_vars import NominalVarsDialog
 from ephys_analysis.protocols import (
@@ -70,10 +71,11 @@ class AnalysisWorker(QThread):
     """Worker thread that runs the analysis pipeline off the GUI thread."""
 
     progress = Signal(int, str)
-    # sample_id, ap_path, APFineResult, rmp_mv, all protocol paths
-    qc_needed = Signal(str, str, object, float, object)
+    # sample_id, ap_path, APFineResult, rmp_mv, all protocol paths, can_go_back
+    qc_needed = Signal(str, str, object, float, object, bool)
     # sample_id, all protocol paths, OneSAPResult
     one_s_ap_review_needed = Signal(str, object, object)
+    ri_ih_review_needed = Signal(str, str, object)
     # list of (sample_id, BaselineFlag)
     baseline_flags_found = Signal(object)
     finished = Signal(list)
@@ -96,6 +98,8 @@ class AnalysisWorker(QThread):
         self._qc_result: QCReview = QCReview(accepted=False)
         self._one_s_ap_result: OneSAPReview = OneSAPReview(accepted=False)
         self._baseline_result = BaselineReview()
+        self._ri_ih_result = True
+        self._qc_paths: list[str] = []
         self._cancelled = False
 
     @property
@@ -116,6 +120,7 @@ class AnalysisWorker(QThread):
                     None if self._skip_qc else self._review_baseline_flags
                 ),
                 skip_qc=self._skip_qc,
+                ri_ih_reviewer=None if self._skip_qc else self._ri_ih_review,
                 progress_callback=self._on_progress,
                 cancel_check=lambda: self._cancelled,
             )
@@ -134,8 +139,13 @@ class AnalysisWorker(QThread):
         """Called from worker thread — emits signal and blocks until main thread responds."""
         self._review_event.clear()
         protocol_paths = self._protocol_paths_for(ap_path)
+        if ap_path in self._qc_paths:
+            self._qc_paths = self._qc_paths[:self._qc_paths.index(ap_path) + 1]
+        else:
+            self._qc_paths.append(ap_path)
         self.qc_needed.emit(
-            sample_id, ap_path, ap_result, rmp_mv, protocol_paths
+            sample_id, ap_path, ap_result, rmp_mv, protocol_paths,
+            len(self._qc_paths) > 1,
         )
         self._review_event.wait()
         if self._cancelled:
@@ -154,6 +164,14 @@ class AnalysisWorker(QThread):
         if self._cancelled:
             raise AnalysisCancelled()
         return self._one_s_ap_result
+
+    def _ri_ih_review(self, sample_id, path, sweeps) -> bool:
+        self._review_event.clear()
+        self.ri_ih_review_needed.emit(sample_id, path, sweeps)
+        self._review_event.wait()
+        if self._cancelled:
+            raise AnalysisCancelled()
+        return self._ri_ih_result
 
     def _review_baseline_flags(
         self, flags: list[tuple[str, BaselineFlag]],
@@ -184,6 +202,10 @@ class AnalysisWorker(QThread):
 
     def set_one_s_ap_result(self, review: OneSAPReview):
         self._one_s_ap_result = review
+        self._review_event.set()
+
+    def set_ri_ih_result(self, accepted: bool):
+        self._ri_ih_result = accepted
         self._review_event.set()
 
     def set_baseline_result(self, review: BaselineReview):
@@ -218,6 +240,8 @@ class MainWindow(QMainWindow):
         self._worker: AnalysisWorker | None = None
         self._analysis_samples: dict[tuple[str, str], SampleInfo] = {}
         self._analysis_is_quick = False
+        self._qc_reviews: dict[str, QCReview] = {}
+        self._qc_contexts: dict[str, tuple[str, APFineResult, float, dict[str, str]]] = {}
 
         self._setup_toolbar()
         self._setup_ui()
@@ -244,6 +268,13 @@ class MainWindow(QMainWindow):
         self._quick_run_btn = QPushButton("Quick Analysis")
         self._quick_run_btn.clicked.connect(self._run_quick_analysis)
         toolbar.addWidget(self._quick_run_btn)
+
+        self._undo_qc_btn = QPushButton(
+            self.style().standardIcon(QStyle.SP_ArrowBack), "Undo QC"
+        )
+        self._undo_qc_btn.setEnabled(False)
+        self._undo_qc_btn.clicked.connect(self._undo_qc)
+        toolbar.addWidget(self._undo_qc_btn)
 
         self._export_btn = QPushButton("Export Results")
         self._export_btn.clicked.connect(self._export_results)
@@ -304,6 +335,7 @@ class MainWindow(QMainWindow):
         self._run_btn.setEnabled(enabled)
         self._quick_run_btn.setEnabled(enabled)
         self._export_btn.setEnabled(enabled)
+        self._undo_qc_btn.setEnabled(enabled and bool(self.results) and bool(self._qc_contexts))
         self.notes_editor.setEnabled(enabled and self._active_note_path is not None)
 
     def _open_project(self):
@@ -312,6 +344,9 @@ class MainWindow(QMainWindow):
             return
         self.project_path = Path(path)
         self.results.clear()
+        self._qc_reviews.clear()
+        self._qc_contexts.clear()
+        self._undo_qc_btn.setEnabled(False)
         self._analysis_samples = {}
         self.file_notes.clear()
         self._active_note_path = None
@@ -464,6 +499,8 @@ class MainWindow(QMainWindow):
         self.results.clear()
         self._analysis_samples = samples
         self._analysis_is_quick = skip_qc
+        self._qc_reviews.clear()
+        self._qc_contexts.clear()
         sample_count = len(samples)
         self.progress.setVisible(True)
         self.progress.setMaximum(sample_count)
@@ -481,6 +518,7 @@ class MainWindow(QMainWindow):
         self._worker.one_s_ap_review_needed.connect(
             self._on_one_s_ap_review_needed
         )
+        self._worker.ri_ih_review_needed.connect(self._on_ri_ih_review_needed)
         self._worker.baseline_flags_found.connect(
             self._on_baseline_flags_found
         )
@@ -521,8 +559,10 @@ class MainWindow(QMainWindow):
         ap_result: APFineResult,
         rmp_mv: float,
         protocol_paths: dict[str, str],
+        can_go_back: bool = False,
     ):
         """Show QC review dialog on main thread, then unblock worker."""
+        self._qc_contexts[ap_path] = (sample_id, replace(ap_result), rmp_mv, protocol_paths)
         dlg = QCReviewDialog(
             sample_id,
             ap_path,
@@ -532,11 +572,15 @@ class MainWindow(QMainWindow):
             protocol_paths=protocol_paths,
             initial_note=self.file_notes.get(ap_path, ""),
             auto_rejected=rmp_mv >= ap_result.voltage_threshold_mv,
+            can_go_back=can_go_back,
+            initial_review=self._qc_reviews.get(ap_path),
         )
         dlg.exec()
         self._store_file_note(ap_path, dlg.notes)
         if dlg.accepted_result == "cancel":
             self._worker.cancel()
+        elif dlg.accepted_result == "back":
+            self._worker.set_qc_result(QCReview(accepted=False, go_back=True))
         else:
             review = QCReview(
                 accepted=dlg.accepted_result is True,
@@ -544,7 +588,57 @@ class MainWindow(QMainWindow):
                 notes=dlg.notes,
                 override_auto_reject=dlg.override_auto_reject,
             )
+            self._qc_reviews[ap_path] = review
             self._worker.set_qc_result(review)
+
+    def _undo_qc(self):
+        paths = list(self._qc_contexts)
+        cursor = len(paths) - 1
+        while cursor >= 0:
+            path = paths[cursor]
+            sample_id, automatic_ap, rmp, protocols = self._qc_contexts[path]
+            key = next(
+                key for key, info in self._analysis_samples.items()
+                if any(str(source) == path for source in info.protocols.values())
+            )
+            result = next(r for r in self.results if (r.animal_id, r.sample_id) == key)
+            if result.qc_status == QCStatus.ANALYSIS_FAILED:
+                cursor -= 1
+                continue
+            dialog = QCReviewDialog(
+                sample_id, path, automatic_ap, rmp, self,
+                protocol_paths=protocols,
+                initial_note=self.file_notes.get(path, ""),
+                auto_rejected=rmp >= automatic_ap.voltage_threshold_mv,
+                can_go_back=cursor > 0,
+                initial_review=self._qc_reviews.get(path), completed=True,
+            )
+            dialog.exec()
+            if dialog.accepted_result == "back":
+                cursor -= 1
+                continue
+            if dialog.accepted_result == "cancel":
+                return
+            review = QCReview(
+                accepted=dialog.accepted_result is True,
+                override_vthresh_mv=dialog.override_vthresh_mv,
+                notes=dialog.notes, override_auto_reject=dialog.override_auto_reject,
+            )
+            result.ap_fine.voltage_threshold_mv = automatic_ap.voltage_threshold_mv
+            apply_qc_review(result, path, review)
+            self._qc_reviews[path] = review
+            self._store_file_note(path, review.notes)
+            result.notes = format_sample_notes(self._analysis_samples[key], self.file_notes)
+            self.statusbar.showMessage(f"QC updated for sample {sample_id}; results not yet re-exported.")
+            return
+
+    def _on_ri_ih_review_needed(self, sample_id, path, sweeps):
+        dialog = RiIhReviewDialog(sample_id, path, sweeps, self)
+        dialog.exec()
+        if dialog.accepted_result == "cancel":
+            self._worker.cancel()
+        else:
+            self._worker.set_ri_ih_result(dialog.accepted_result is True)
 
     def _on_one_s_ap_review_needed(
         self,
@@ -568,6 +662,7 @@ class MainWindow(QMainWindow):
             self._worker.set_one_s_ap_result(OneSAPReview(
                 accepted=dlg.accepted_result is True,
                 notes=dlg.notes,
+                excluded_sweeps=dlg.excluded_sweeps,
             ))
 
     def _store_file_note(self, path: str, note: str):
@@ -714,6 +809,7 @@ class MainWindow(QMainWindow):
         export_passed(self.results, output_path, timestamp)
         export_rejected(self.results, output_path, timestamp)
         export_fully_compiled(self.results, output_path, timestamp)
+        export_cell_types(self.results, output_path, timestamp)
         export_ri_ih_contaminated_sweeps(
             self.results, output_path, timestamp
         )
