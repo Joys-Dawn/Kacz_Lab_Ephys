@@ -127,7 +127,7 @@ the rejected recordings before protocol analysis begins.
 
 ### RMP
 
-The reported RMP is the average of three 200 ms voltage means: the first 200 ms, a 200 ms window centered in the recording, and the final 200 ms.
+The reported RMP is the mean voltage over the first 200 ms (0-0.2 s) of the first sweep.
 
 ### Input Resistance (Ri, MOhm)
 

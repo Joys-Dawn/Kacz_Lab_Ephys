@@ -14,25 +14,42 @@ class TestAnalyzeRMP:
         assert -80.0 < result.rmp_mv < -40.0, f"RMP {result.rmp_mv} mV outside physiological range"
 
     def test_rmp_matches_reference_for_sample_1666(self, abf_rmp):
-        """Three-window RMP for sample 1666 is -65.807 mV."""
+        """First-200-ms RMP for sample 1666 is -57.933 mV."""
         abf = load_abf(abf_rmp)
 
         result = analyze_rmp(abf)
 
-        assert result.rmp_mv == pytest.approx(-65.807, abs=0.01)
+        assert result.rmp_mv == pytest.approx(-57.933, abs=0.01)
 
-    def test_rmp_averages_start_middle_and_end_windows(self, abf_rmp):
+    def test_rmp_averages_only_first_200_ms(self, abf_rmp):
         abf = load_abf(abf_rmp)
         data = get_sweep_data(abf, sweep=0, channel=0)
         window_samples = round(0.2 * abf.sampleRate)
-        middle = len(data) // 2
-        half_window = window_samples // 2
-        expected = float(np.mean([
-            float(np.mean(data[:window_samples])),
-            float(np.mean(data[middle - half_window:middle + half_window])),
-            float(np.mean(data[-window_samples:])),
-        ]))
+        expected = float(np.mean(data[:window_samples]))
 
         result = analyze_rmp(abf)
 
         assert result.rmp_mv == pytest.approx(expected, abs=1e-6)
+
+    def test_rmp_ignores_data_at_and_after_200_ms(self, abf_rmp):
+        abf = load_abf(abf_rmp)
+        window_samples = round(0.2 * abf.sampleRate)
+        abf.data[0, :] = 20.0
+        abf.data[0, :window_samples // 2] = -80.0
+        abf.data[0, window_samples // 2:window_samples] = -60.0
+
+        result = analyze_rmp(abf)
+
+        assert result.rmp_mv == -70.0
+
+    @pytest.mark.parametrize("sample_count", [1999, 2000])
+    def test_rmp_preserves_original_short_recording_behavior(self, monkeypatch, sample_count):
+        from ephys_analysis.protocols import rmp
+
+        monkeypatch.setattr(
+            rmp, "get_sweep_data",
+            lambda abf, sweep, channel: np.full(sample_count, -65.0),
+        )
+        monkeypatch.setattr(rmp, "get_sampling_rate", lambda abf: 10000)
+
+        assert analyze_rmp(None).rmp_mv == -65.0
