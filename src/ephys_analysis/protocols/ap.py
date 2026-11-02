@@ -145,8 +145,8 @@ def _analyze_ap(abf: pyabf.ABF) -> APFineResult | None:
             logger.warning("Half width could not be computed for sweep %d", sweep_idx)
             half_width_ms = 0.0
 
-        # Spike count at threshold sweep — count voltage peaks above 0 mV
-        spike_count, _, _ = count_spikes_voltage(ap_segment, rate, threshold_mv=0.0)
+        # Count the whole threshold sweep; the waveform window can truncate a burst.
+        spike_count, _, _ = count_spikes_voltage(response, rate, threshold_mv=0.0)
 
         # Current Threshold (Ithresh) — measured stimulus means from the
         # protocol's inclusive R1 and R2 cursor windows (R2S1 − R1S1).

@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+from ephys_analysis.core.abf_io import load_abf
 from ephys_analysis.core.types import (
     SampleResult, QCStatus, RMPResult, APFineResult,
     RiIhResult, RampResult, AHPResult, OneSAPResult, OneSAPSweep,
@@ -10,6 +11,31 @@ from ephys_analysis.io.excel_export import (
     export_trimming_analysis,
     export_ri_ih_contaminated_sweeps,
 )
+from ephys_analysis.protocols.ap import analyze_ap_fine
+
+
+def test_recorded_fine_ap_burst_exports_count_and_correct_cohort(
+    tmp_path, abf_ap_fine_burst
+):
+    sample = SampleResult(sample_id="1536", animal_id="63542")
+    sample.ap_fine = analyze_ap_fine(load_abf(abf_ap_fine_burst))
+    assert sample.cell_type == "Burst"
+
+    paths = [
+        export_passed([sample], tmp_path),
+        export_fully_compiled([sample], tmp_path),
+        *export_cell_types([sample], tmp_path),
+    ]
+    for path in paths:
+        compiled = pd.read_excel(path, sheet_name="Fully Compiled")
+        if path.name.startswith(("REGULAR SPIKING", "INTERNEURONS")):
+            assert compiled.empty
+            continue
+        for sheet in ("Current Threshold", "Fully Compiled"):
+            row = pd.read_excel(path, sheet_name=sheet).iloc[0]
+            assert row["Sample #"] == 1536
+            assert row["Spike #"] == 2
+            assert row["Cell Type"] == "Burst"
 
 
 def test_six_workbooks_partition_passed_types_and_sort_all_cells(tmp_path):

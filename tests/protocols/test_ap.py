@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from ephys_analysis.core.abf_io import get_sweep_data, load_abf
@@ -40,6 +42,30 @@ class TestAnalyzeAPFine:
         result = analyze_ap_fine(abf)
 
         assert result.spike_num >= 1
+
+    def test_counts_burst_after_310_ms_in_threshold_sweep(self, abf_ap_fine_burst):
+        result = analyze_ap_fine(load_abf(abf_ap_fine_burst))
+
+        assert result.sweep_num == 3
+        assert result.spike_num == 2
+
+    @pytest.mark.parametrize("analyze", [analyze_ap_fine, analyze_ap_coarse])
+    @pytest.mark.parametrize("late_spike_sec", [0.31025, 0.8, 2.8])
+    def test_full_sweep_count_does_not_extend_measurement_windows(
+        self, abf_ap_fine, late_spike_sec, analyze
+    ):
+        abf = load_abf(abf_ap_fine)
+        original = analyze(abf)
+        assert original.spike_num == 1
+        sweep_start = (original.sweep_num - 1) * abf.sweepPointCount
+
+        # A taller late spike must affect the count, not the first AP's metrics.
+        peak = sweep_start + round(late_spike_sec * abf.sampleRate)
+        abf.data[0, peak - 2:peak + 3] = [-70.0, 20.0, 100.0, 20.0, -70.0]
+        burst = analyze(abf)
+
+        assert burst.spike_num == 2
+        assert replace(burst, spike_num=1) == original
 
     def test_voltage_threshold_in_physiological_range(self, abf_ap_fine):
         abf = load_abf(abf_ap_fine)

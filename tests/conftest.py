@@ -45,6 +45,11 @@ def abf_ap_fine_negative_pulse():
 
 
 @pytest.fixture
+def abf_ap_fine_burst():
+    return SAMPLE_DATA / "63542_0005.abf"
+
+
+@pytest.fixture
 def abf_ramp():
     return SAMPLE_1666 / "2026_02_04_JCA_0006.abf"
 

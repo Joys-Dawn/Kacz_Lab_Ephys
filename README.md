@@ -225,6 +225,10 @@ is at least 100 Hz. Otherwise, the AP threshold sweep is classified as
 spike. Interneuron classification takes precedence, so classifications are
 mutually exclusive. Half-width is not used for Cell Type classification.
 
+For Fine and Coarse AP, `Spike #` counts peaks across the whole selected
+threshold sweep, not just the 0.29-0.31 s waveform-measurement window. Sweep
+selection and the waveform-measurement windows are unchanged.
+
 ### AHP (5 / 25 / 50 spike)
 
 Each AHP protocol fires a train of 5, 25, or 50 brief current pulses, then records the afterhyperpolarization. Three metrics are reported for each train length, averaged across the protocol's two sweeps:
