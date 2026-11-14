@@ -54,6 +54,7 @@ class BaselineFlag:
 class BaselineReview:
     """User decisions for baseline-flagged recordings, keyed by ABF path."""
     decisions: dict[str, bool] = field(default_factory=dict)
+    excluded_sweeps: dict[str, set[int]] = field(default_factory=dict)  # original 1-based numbers
 
 
 @dataclass
@@ -124,7 +125,6 @@ class OneSAPSweep:
     isi_ms: list[float] = field(default_factory=list)
     raw_spike_count: int = 0
     stimulus_baseline_mv: float | None = None
-    sudden_drop: bool = False
     flagged_high_firing: bool = False
     excluded: bool = False
 
@@ -139,15 +139,13 @@ class OneSAPResult:
     ithresh_ff_hz: float | None = None
     rheobase_su_ff_hz: float = 0.0
     first_sweep: int = -1
-    sudden_drop_sweeps: list[int] = field(default_factory=list)
     baseline_at_or_above_zero_sweeps: list[int] = field(default_factory=list)
     high_firing_sweeps: list[int] = field(default_factory=list)
 
     @property
     def requires_review(self) -> bool:
         return bool(
-            self.sudden_drop_sweeps
-            or self.baseline_at_or_above_zero_sweeps
+            self.baseline_at_or_above_zero_sweeps
             or self.high_firing_sweeps
         )
 

@@ -37,7 +37,9 @@ AHP_50 = AHPCursors(
 )
 
 
-def analyze_ahp(abf: pyabf.ABF, cursors: AHPCursors) -> AHPResult:
+def analyze_ahp(
+    abf: pyabf.ABF, cursors: AHPCursors, excluded_sweeps: set[int] | None = None,
+) -> AHPResult | None:
     """Analyze AHP protocol (5, 25, or 50 spike) using provided cursor positions.
 
     Measures baseline, antipeak, 200ms mean, and 1000ms mean per sweep.
@@ -50,6 +52,8 @@ def analyze_ahp(abf: pyabf.ABF, cursors: AHPCursors) -> AHPResult:
     ms1000s = []
 
     for sweep_idx in range(abf.sweepCount):
+        if excluded_sweeps and sweep_idx + 1 in excluded_sweeps:
+            continue
         response = get_sweep_data(abf, sweep_idx, channel=0)
 
         bl = windowed_mean(response, *cursors.baseline, rate)
@@ -61,6 +65,8 @@ def analyze_ahp(abf: pyabf.ABF, cursors: AHPCursors) -> AHPResult:
         ms200s.append(m200 - bl)
         ms1000s.append(m1000 - bl)
 
+    if not peaks:
+        return None
     return AHPResult(
         peak_mv=float(np.mean(peaks)),
         ms200_mv=float(np.mean(ms200s)),

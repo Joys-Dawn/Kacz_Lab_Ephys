@@ -84,7 +84,9 @@ def _interpolated_half_width(
     return (fall_idx - rise_idx) * dt_ms
 
 
-def _analyze_ap(abf: pyabf.ABF) -> APFineResult | None:
+def _analyze_ap(
+    abf: pyabf.ABF, excluded_sweeps: set[int] | None = None,
+) -> APFineResult | None:
     """Core AP analysis shared by fine and coarse.
 
     Returns None if no sweep has a detectable spike.
@@ -92,6 +94,8 @@ def _analyze_ap(abf: pyabf.ABF) -> APFineResult | None:
     rate = get_sampling_rate(abf)
 
     for sweep_idx in range(abf.sweepCount):
+        if excluded_sweeps and sweep_idx + 1 in excluded_sweeps:
+            continue
         response = get_sweep_data(abf, sweep_idx, channel=0)
 
         # Check if this sweep has a full action potential:
@@ -175,11 +179,15 @@ def _analyze_ap(abf: pyabf.ABF) -> APFineResult | None:
     return None
 
 
-def analyze_ap_fine(abf: pyabf.ABF) -> APFineResult | None:
+def analyze_ap_fine(
+    abf: pyabf.ABF, excluded_sweeps: set[int] | None = None,
+) -> APFineResult | None:
     """Analyze AP fine protocol."""
-    return _analyze_ap(abf)
+    return _analyze_ap(abf, excluded_sweeps)
 
 
-def analyze_ap_coarse(abf: pyabf.ABF) -> APFineResult | None:
+def analyze_ap_coarse(
+    abf: pyabf.ABF, excluded_sweeps: set[int] | None = None,
+) -> APFineResult | None:
     """Analyze AP coarse protocol (fallback when AP fine is missing)."""
-    return _analyze_ap(abf)
+    return _analyze_ap(abf, excluded_sweeps)

@@ -10,12 +10,16 @@ from ephys_analysis.core.spike import find_voltage_threshold
 from ephys_analysis.core.types import RampResult, DVDT_CRITERION_MV_MS
 
 
-def analyze_ramp(abf: pyabf.ABF) -> RampResult | None:
+def analyze_ramp(
+    abf: pyabf.ABF, excluded_sweeps: set[int] | None = None,
+) -> RampResult | None:
     """Analyze ramp protocol for rheobase.
 
     Per spec: Rheobase = positive peak − negative peak of the stimulus
     signal (pA) within a window from t=0 s to the first AP threshold.
     """
+    if excluded_sweeps and 1 in excluded_sweeps:
+        return None
     rate = get_sampling_rate(abf)
     response = get_sweep_data(abf, sweep=0, channel=0)
 

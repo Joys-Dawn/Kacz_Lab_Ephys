@@ -41,6 +41,8 @@ class QCReviewDialog(QDialog):
         can_go_back: bool = False,
         initial_review: QCReview | None = None,
         completed: bool = False,
+        voltage_offset_mv: float = 0.0,
+        excluded_sweeps_by_path: dict[str, set[int]] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"QC Review — Sample {sample_id}")
@@ -51,11 +53,13 @@ class QCReviewDialog(QDialog):
         self._auto_vthresh_mv = ap_result.voltage_threshold_mv
         self._ap_path = str(Path(abf_path))
         self._auto_rejected = auto_rejected
+        self._voltage_offset_mv = voltage_offset_mv
+        self._excluded_sweeps_by_path = excluded_sweeps_by_path or {}
         self.accepted_result = None  # True / False / "cancel"
         self.override_vthresh_mv: float | None = None  # set on Accept if changed
         self.override_auto_reject = False
 
-        abf = load_abf(abf_path)
+        abf = load_abf(abf_path, voltage_offset_mv=voltage_offset_mv)
         rate = get_sampling_rate(abf)
         sweep_idx = ap_result.sweep_num - 1  # sweep_num is 1-indexed
         self._ap_time = get_sweep_time(abf, sweep_idx)
@@ -277,7 +281,10 @@ class QCReviewDialog(QDialog):
             self.trace_viewer.refresh()
         else:
             self._vthresh_line = None
-            self.trace_viewer.plot_abf(path)
+            self.trace_viewer.plot_abf(
+                path, voltage_offset_mv=self._voltage_offset_mv,
+                excluded_sweeps=self._excluded_sweeps_by_path.get(path),
+            )
 
     def _reset(self):
         self.picker.select_index(self.picker.auto_idx)

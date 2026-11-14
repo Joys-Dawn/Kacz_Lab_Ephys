@@ -55,10 +55,8 @@ def analyze_one_s_ap(
     first_sweep = -1
     rheobase_su_ff = 0.0
     rheobase_su_found = False
-    sudden_drop_sweeps = []
     baseline_at_or_above_zero_sweeps = []
     high_firing_sweeps = []
-    previous_spike_count: int | None = None
     baseline_samples = max(
         1,
         min(
@@ -79,11 +77,6 @@ def analyze_one_s_ap(
         spike_count = raw_spike_count
         ff = (raw_spike_count / step_duration) if step_duration > 0 else 0.0
         stimulus_baseline_mv = float(np.mean(step_data[:baseline_samples]))
-        sudden_drop = (
-            previous_spike_count is not None
-            and previous_spike_count >= 5
-            and raw_spike_count == 1
-        )
         flagged_high_firing = raw_spike_count >= HIGH_FIRING_REVIEW_THRESHOLD
 
         sweeps.append(OneSAPSweep(
@@ -93,22 +86,17 @@ def analyze_one_s_ap(
             isi_ms=isi_ms,
             raw_spike_count=raw_spike_count,
             stimulus_baseline_mv=stimulus_baseline_mv,
-            sudden_drop=sudden_drop,
             flagged_high_firing=flagged_high_firing,
             excluded=sweep_idx + 1 in excluded_sweeps,
         ))
 
         sweep_num = sweep_idx + 1
-        if sudden_drop:
-            sudden_drop_sweeps.append(sweep_num)
+        if sweep_num in excluded_sweeps:
+            continue
         if stimulus_baseline_mv >= 0.0:
             baseline_at_or_above_zero_sweeps.append(sweep_num)
         if flagged_high_firing:
             high_firing_sweeps.append(sweep_num)
-
-        previous_spike_count = raw_spike_count
-        if sweep_num in excluded_sweeps:
-            continue
 
         if spike_count and first_sweep == -1:
             first_sweep = sweep_idx
@@ -142,7 +130,6 @@ def analyze_one_s_ap(
         ithresh_ff_hz=ithresh_ff,
         rheobase_su_ff_hz=rheobase_su_ff,
         first_sweep=first_sweep,
-        sudden_drop_sweeps=sudden_drop_sweeps,
         baseline_at_or_above_zero_sweeps=baseline_at_or_above_zero_sweeps,
         high_firing_sweeps=high_firing_sweeps,
     )

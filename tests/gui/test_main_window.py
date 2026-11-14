@@ -29,7 +29,7 @@ def test_rin_review_routes_decision_to_worker(qtbot, monkeypatch, decision):
         set_ri_ih_result=lambda value: calls.append(value),
         cancel=lambda: calls.append("cancel"),
     )
-    monkeypatch.setattr(mw_module, "RiIhReviewDialog", lambda *a: SimpleNamespace(
+    monkeypatch.setattr(mw_module, "RiIhReviewDialog", lambda *a, **kw: SimpleNamespace(
         exec=lambda: None, accepted_result=decision,
     ))
     win._on_ri_ih_review_needed("1", "rin.abf", [])
@@ -123,13 +123,14 @@ def test_threaded_analysis_can_backtrack_and_finish(qtbot, monkeypatch, sample_d
             return 1
 
     monkeypatch.setattr(mw_module, "QCReviewDialog", Review)
-    monkeypatch.setattr(mw_module, "BaselineReviewDialog", lambda flags, *a: SimpleNamespace(
+    monkeypatch.setattr(mw_module, "BaselineReviewDialog", lambda flags, *a, **kw: SimpleNamespace(
         exec=lambda: 1, decisions={flag.file_path: True for _, flag in flags},
+        excluded_sweeps={},
     ))
     monkeypatch.setattr(mw_module, "OneSAPReviewDialog", lambda *a, **kw: SimpleNamespace(
         exec=lambda: 1, accepted_result=True, notes="", excluded_sweeps=set(),
     ))
-    monkeypatch.setattr(mw_module, "RiIhReviewDialog", lambda *a: SimpleNamespace(
+    monkeypatch.setattr(mw_module, "RiIhReviewDialog", lambda *a, **kw: SimpleNamespace(
         exec=lambda: 1, accepted_result=True,
     ))
     monkeypatch.setattr(QMessageBox, "information", lambda *a: None)
@@ -1014,10 +1015,11 @@ class TestAnalysisWorker:
         captured = {}
 
         class FakeDialog:
-            def __init__(self, flags, parent):
+            def __init__(self, flags, parent, **kwargs):
                 captured["flags"] = flags
                 captured["parent"] = parent
                 self.decisions = {flags[0][1].file_path: False}
+                self.excluded_sweeps = {}
 
             def exec(self):
                 captured["shown"] = True
@@ -1057,7 +1059,7 @@ class TestAnalysisWorker:
         class FakeDialog:
             decisions = {}
 
-            def __init__(self, flags, parent):
+            def __init__(self, flags, parent, **kwargs):
                 pass
 
             def exec(self):

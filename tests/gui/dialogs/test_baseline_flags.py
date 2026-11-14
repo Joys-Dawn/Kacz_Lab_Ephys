@@ -1,176 +1,100 @@
-from pathlib import Path
-
+import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QDialog
 
+from ephys_analysis.core.abf_io import load_abf, get_sweep_data
 from ephys_analysis.core.types import BaselineFlag
 from ephys_analysis.gui.dialogs.baseline_flags import BaselineReviewDialog
 
 
-def _flag(
-    file_number: int = 1,
-    *,
-    sweeps: list[int] | None = None,
-) -> BaselineFlag:
+def _flag(path):
+    abf = load_abf(path)
     return BaselineFlag(
-        protocol="4. Ih and Input Resistance",
-        file_path=f"C:/data/recording_{file_number:04d}.abf",
-        target_mv=-67.0,
-        baseline_means_mv=[-50.0],
-        out_of_range_sweeps=sweeps or [1],
-        changed_sweep_pairs=[(3, 4), (15, 16), (16, 17)],
+        abf.protocol, str(path), -67,
+        baseline_means_mv=[-50.0] * abf.sweepCount,
+        out_of_range_sweeps=list(range(1, abf.sweepCount + 1)),
+        changed_sweep_pairs=[(1, 2), (2, 3), (3, 4)],
     )
 
 
-def test_shows_one_compact_row_per_flag(qtbot):
-    dialog = BaselineReviewDialog([("1542", _flag())])
+def test_shows_each_sweep_with_its_baseline_and_reason(qtbot, abf_ri_ih):
+    flag = _flag(abf_ri_ih)
+    dialog = BaselineReviewDialog([("1666", flag)])
     qtbot.addWidget(dialog)
-
-    assert dialog.table.topLevelItemCount() == 1
-    item = dialog.table.topLevelItem(0)
-    reason = item.text(3)
-    assert item.text(0) == "1542"
-    assert item.text(1) == "recording_0001.abf"
-    assert item.text(2) == "4. Ih and Input Resistance"
-    assert "sweeps 1" in reason
-    assert "pairs 3-4, 15-16, 16-17" in reason
-
-
-def test_consecutive_sweeps_are_collapsed_into_ranges(qtbot):
-    dialog = BaselineReviewDialog([
-        ("1542", _flag(sweeps=list(range(1, 17)) + list(range(19, 23)))),
-    ])
-    qtbot.addWidget(dialog)
-
-    reason = dialog.table.topLevelItem(0).text(3)
-    assert "sweeps 1-16, 19-22" in reason
-    assert "1, 2, 3" not in reason
-
-
-def test_reason_wraps_and_preview_does_not_take_stretch_width(qtbot):
-    dialog = BaselineReviewDialog([("1542", _flag())])
-    qtbot.addWidget(dialog)
-    dialog.resize(1100, 650)
-    dialog.show()
-    qtbot.wait(20)
-
-    item = dialog.table.topLevelItem(0)
-    assert "\n" in item.text(3)
-    assert dialog.table.itemDelegateForColumn(3) is dialog._reason_delegate
-    assert dialog.table.visualItemRect(item).height() > 36
-    assert dialog.table.header().stretchLastSection() is False
-    assert dialog.table.columnWidth(3) > dialog.table.columnWidth(5)
-    assert dialog.table.columnWidth(5) == 90
-
-
-def test_long_list_scrolls_inside_bounded_dialog(qtbot):
-    flags = [(str(1500 + i), _flag(i)) for i in range(80)]
-    dialog = BaselineReviewDialog(flags)
-    qtbot.addWidget(dialog)
-    dialog.show()
-    qtbot.wait(20)
-
-    available = dialog.screen().availableGeometry()
-    assert dialog.height() <= min(680, available.height() - 40)
-    assert dialog.width() <= min(1100, available.width() - 40)
-    assert dialog.table.verticalScrollBar().maximum() > 0
-    assert dialog.table.horizontalScrollBar().maximum() == 0
-    assert dialog.table.wordWrap() is False
-    assert dialog.table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
-
-
-def test_narrow_window_keeps_reasons_and_controls_in_view(qtbot):
-    dialog = BaselineReviewDialog([(str(1500 + i), _flag(i)) for i in range(80)])
-    qtbot.addWidget(dialog)
-    dialog.show()
-
-    for width in (740, 1100, 700):
-        dialog.resize(width, 650)
-        dialog.table.setColumnWidth(1, 160)
-        dialog.table.setColumnWidth(2, 160)
-        qtbot.wait(30)
-
-        assert dialog.table.horizontalScrollBar().maximum() == 0
-        assert dialog.table.columnWidth(3) >= 140
-        assert dialog.table.columnWidth(4) == 210
-        assert dialog.table.columnWidth(5) == 90
-        first = dialog.table.visualItemRect(dialog.table.topLevelItem(0))
-        second = dialog.table.visualItemRect(dialog.table.topLevelItem(1))
-        assert first.bottom() < second.top()
-
-    dialog.resize(1100, 650)
-    qtbot.wait(30)
-    dialog.table.setColumnWidth(1, 240)
-    qtbot.wait(30)
-    assert dialog.table.columnWidth(1) == 240
-
-
-def test_each_file_requires_an_explicit_decision(qtbot):
-    first = _flag(1)
-    second = _flag(2)
-    dialog = BaselineReviewDialog([
-        ("1542", first),
-        ("1543", second),
-    ])
-    qtbot.addWidget(dialog)
-
+    assert "1666" in dialog.heading.text()
+    assert abf_ri_ih.name in dialog.heading.text()
+    assert dialog.table.topLevelItemCount() == len(flag.baseline_means_mv)
+    assert len(dialog.viewer.ax.lines) == len(flag.baseline_means_mv)
+    row = dialog.table.topLevelItem(1)
+    assert row.text(0) == "2"
+    assert row.text(1) == "-50.00"
+    assert "-77 to -57" in row.text(2)
+    assert "1-2, 2-3" in row.text(3)
+    assert row.checkState(0) == Qt.Checked
     assert dialog.decisions == {}
-    assert dialog.continue_button.isEnabled() is False
-
-    first_accept, _ = dialog._decision_radios[first.file_path]
-    _, second_reject = dialog._decision_radios[second.file_path]
-    first_accept.setChecked(True)
-
-    assert dialog.continue_button.isEnabled() is False
-    assert dialog.review_status.text() == "1 of 2 files reviewed"
-
-    second_reject.setChecked(True)
-
-    assert dialog.decisions == {
-        first.file_path: True,
-        second.file_path: False,
-    }
-    assert dialog.continue_button.isEnabled() is True
-    assert dialog.review_status.text() == "2 of 2 files reviewed"
 
 
-def test_dialog_has_continue_cancel_and_preview_actions(qtbot):
-    dialog = BaselineReviewDialog([("1542", _flag())])
+def test_selection_hides_sweeps_and_preserves_original_numbers(qtbot, abf_ri_ih):
+    flag = _flag(abf_ri_ih)
+    dialog = BaselineReviewDialog([("1666", flag)])
     qtbot.addWidget(dialog)
-    button_text = {
-        button.text() for button in dialog.findChildren(QPushButton)
-    }
+    dialog.table.topLevelItem(2).setCheckState(0, Qt.Unchecked)
+    assert not dialog.viewer.ax.lines[2].get_visible()
+    dialog.table.topLevelItem(2).setCheckState(0, Qt.Checked)
+    assert dialog.viewer.ax.lines[2].get_visible()
+    dialog.table.topLevelItem(5).setCheckState(0, Qt.Unchecked)
+    dialog.keep_button.click()
+    assert dialog.decisions == {flag.file_path: True}
+    assert dialog.excluded_sweeps == {flag.file_path: {6}}
+    assert dialog.result() == QDialog.DialogCode.Accepted
 
-    assert {"Preview", "Continue Analysis", "Cancel Analysis"} <= button_text
 
-
-def test_preview_plots_every_sweep(qtbot, monkeypatch):
-    flag = _flag()
-    plotted = []
-    monkeypatch.setattr(
-        "ephys_analysis.gui.dialogs.baseline_flags.TraceViewer.plot_abf",
-        lambda self, path, max_sweeps=None: plotted.append((path, max_sweeps)),
-    )
-    dialog = BaselineReviewDialog([("1542", flag)])
+def test_each_file_requires_decision_before_next_file(qtbot, abf_ri_ih, abf_ap_fine):
+    first, second = _flag(abf_ri_ih), _flag(abf_ap_fine)
+    dialog = BaselineReviewDialog([("1666", first), ("1666", second)])
     qtbot.addWidget(dialog)
+    dialog.keep_button.click()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert "File 2 of 2" in dialog.review_status.text()
+    assert abf_ap_fine.name in dialog.heading.text()
+    dialog.reject_button.click()
+    assert dialog.decisions == {first.file_path: True, second.file_path: False}
+    assert dialog.excluded_sweeps[second.file_path] == set(range(1, len(second.baseline_means_mv) + 1))
+    assert dialog.result() == QDialog.DialogCode.Accepted
 
-    dialog._preview(Path(flag.file_path))
 
-    assert plotted == [(Path(flag.file_path), None)]
-
-
-def test_bulk_decisions_respect_deselection_and_allow_correction(qtbot):
-    flags = [(str(i), _flag(i)) for i in range(3)]
-    dialog = BaselineReviewDialog(flags)
+def test_no_selected_sweeps_requires_explicit_file_rejection(qtbot, abf_ap_fine):
+    dialog = BaselineReviewDialog([("1666", _flag(abf_ap_fine))])
     qtbot.addWidget(dialog)
-    dialog._select_all()
-    dialog.table.topLevelItem(1).setCheckState(0, Qt.Unchecked)
-    dialog._decide_selected(True)
-    assert dialog.decisions == {flags[i][1].file_path: True for i in (0, 2)}
-    assert not dialog.continue_button.isEnabled()
-    dialog._select_all()
-    dialog._decide_selected(False)
-    assert dialog.decisions == {flag.file_path: False for _, flag in flags}
-    assert dialog.continue_button.isEnabled()
-    dialog._decision_radios[flags[1][1].file_path][0].click()
-    assert dialog.decisions[flags[1][1].file_path] is True
+    for row in range(dialog.table.topLevelItemCount()):
+        dialog.table.topLevelItem(row).setCheckState(0, Qt.Unchecked)
+    assert not dialog.keep_button.isEnabled()
+    assert dialog.reject_button.isEnabled()
+    assert dialog.decisions == {}
+    dialog.cancel_button.click()
+    assert dialog.result() == QDialog.DialogCode.Rejected
+    assert dialog.decisions == {}
+
+
+def test_preview_uses_corrected_voltages(qtbot, abf_ri_ih):
+    dialog = BaselineReviewDialog([("1666", _flag(abf_ri_ih))], voltage_offset_mv=-10)
+    qtbot.addWidget(dialog)
+    original = get_sweep_data(load_abf(abf_ri_ih), 0)
+    np.testing.assert_array_equal(dialog.viewer.ax.lines[0].get_ydata(), original - 10)
+    assert "-10 mV" in dialog.review_status.text()
+
+
+def test_sweep_list_scrolls_and_actions_remain_visible(qtbot, abf_ri_ih):
+    dialog = BaselineReviewDialog([("1666", _flag(abf_ri_ih))])
+    qtbot.addWidget(dialog)
+    dialog.show()
+    for width in (740, 1100, 900):
+        dialog.resize(width, 650)
+        qtbot.wait(30)
+        assert dialog.table.verticalScrollBar().maximum() > 0
+        for button in (dialog.keep_button, dialog.reject_button, dialog.cancel_button):
+            assert dialog.rect().contains(button.geometry())
+        for row in range(dialog.table.topLevelItemCount() - 1):
+            first = dialog.table.visualItemRect(dialog.table.topLevelItem(row))
+            second = dialog.table.visualItemRect(dialog.table.topLevelItem(row + 1))
+            assert first.bottom() < second.top()

@@ -11,14 +11,15 @@ from ephys_analysis.protocols.one_s_ap import analyze_one_s_ap
 
 
 def test_review_layouts_render_without_clipped_actions(
-    qtbot, tmp_path, abf_1s_ap_high_firing, abf_ap_fine, ap_fine_result,
+    qtbot, tmp_path, abf_1s_ap_high_firing, abf_ap_fine, ap_fine_result, abf_ri_ih,
 ):
     baseline = BaselineReviewDialog([
-        (str(1500 + i), BaselineFlag(
-            "4. Ih and Input Resistance", f"recording_{i}.abf", -67,
+        ("1666", BaselineFlag(
+            "4. Ih and Input Resistance", str(abf_ri_ih), -67,
+            baseline_means_mv=[-50] * load_abf(abf_ri_ih).sweepCount,
             out_of_range_sweeps=list(range(1, 23)),
             changed_sweep_pairs=[(3, 4), (15, 16), (16, 17)],
-        )) for i in range(20)
+        ))
     ])
     firing = OneSAPReviewDialog(
         "1566", {PROTO_1S_AP: str(abf_1s_ap_high_firing)},
@@ -46,6 +47,6 @@ def test_review_layouts_render_without_clipped_actions(
             first = baseline.table.visualItemRect(baseline.table.topLevelItem(row))
             second = baseline.table.visualItemRect(baseline.table.topLevelItem(row + 1))
             assert first.bottom() < second.top()
-    baseline.table.topLevelItem(0).setCheckState(0, Qt.Checked)
-    baseline._decide_selected(False)
-    assert baseline.decisions["recording_0.abf"] is False
+    baseline.table.topLevelItem(0).setCheckState(0, Qt.Unchecked)
+    baseline.keep_button.click()
+    assert baseline.excluded_sweeps[str(abf_ri_ih)] == {1}

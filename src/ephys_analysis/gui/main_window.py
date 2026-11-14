@@ -8,12 +8,12 @@ from PySide6.QtWidgets import (
     QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
     QFileDialog, QTreeWidget, QTreeWidgetItem, QLabel, QProgressBar,
     QPlainTextEdit, QStatusBar, QToolBar, QMessageBox, QSplitter,
-    QAbstractItemView, QStyle,
+    QAbstractItemView, QStyle, QInputDialog,
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
 from ephys_analysis.core.pipeline import (
-    analyze_all, apply_qc_review, exclude_protocol_paths, format_sample_notes,
+    analyze_all, apply_qc_review, apply_baseline_review, format_sample_notes,
 )
 from ephys_analysis.core.types import (
     SampleResult, QCStatus, APFineResult, AnalysisCancelled, QCReview,
@@ -210,12 +210,7 @@ class AnalysisWorker(QThread):
 
     def set_baseline_result(self, review: BaselineReview):
         self._baseline_result = review
-        rejected_paths = {
-            path for path, accepted in review.decisions.items() if not accepted
-        }
-        self._samples = exclude_protocol_paths(
-            self._samples, rejected_paths
-        )
+        self._samples = apply_baseline_review(self._samples, review)
         self._review_event.set()
 
     def cancel(self):
@@ -259,6 +254,11 @@ class MainWindow(QMainWindow):
         self._nominal_btn = QPushButton("Load Nominal Variables")
         self._nominal_btn.clicked.connect(self._load_nominal)
         toolbar.addWidget(self._nominal_btn)
+
+        self._voltage_offset_btn = QPushButton("Voltage Offset")
+        self._voltage_offset_btn.setToolTip("Set the voltage correction for the selected sample")
+        self._voltage_offset_btn.clicked.connect(self._set_voltage_offset)
+        toolbar.addWidget(self._voltage_offset_btn)
 
         self._run_btn = QPushButton("Run Analysis")
         self._run_btn.setStyleSheet("font-weight: bold;")
@@ -332,6 +332,7 @@ class MainWindow(QMainWindow):
         """Enable/disable toolbar buttons during analysis."""
         self._open_btn.setEnabled(enabled)
         self._nominal_btn.setEnabled(enabled)
+        self._voltage_offset_btn.setEnabled(enabled)
         self._run_btn.setEnabled(enabled)
         self._quick_run_btn.setEnabled(enabled)
         self._export_btn.setEnabled(enabled)
@@ -384,6 +385,9 @@ class MainWindow(QMainWindow):
             self.tree.addTopLevelItem(animal_item)
             for info in sorted(infos, key=lambda i: i.sample_id):
                 sample_item = QTreeWidgetItem([info.sample_id])
+                sample_item.setData(0, Qt.UserRole + 1, (animal_id, info.sample_id))
+                if info.voltage_offset_mv:
+                    sample_item.setText(1, f"Offset: {info.voltage_offset_mv:+g} mV")
                 animal_item.addChild(sample_item)
                 for protocol, path in sorted(
                     info.protocols.items(),
@@ -411,7 +415,58 @@ class MainWindow(QMainWindow):
             self.notes_editor.setPlainText(self.file_notes.get(path_str, ""))
             self.notes_editor.blockSignals(False)
             self.notes_editor.setEnabled(self._worker is None)
-            self.trace_viewer.plot_abf(path)
+            self.trace_viewer.plot_abf(path, voltage_offset_mv=self._sample_for_path(path_str).voltage_offset_mv)
+
+    def _sample_for_path(self, path: str) -> SampleInfo:
+        for samples in (self._analysis_samples, self.scan_result.samples if self.scan_result else {}):
+            for info in samples.values():
+                if any(str(p) == path for p in info.protocols.values()):
+                    return info
+        return SampleInfo()
+
+    def _set_voltage_offset(self):
+        if not self.scan_result:
+            QMessageBox.warning(self, "No Data", "Open a project folder first.")
+            return
+        keys = set()
+        for selected in self.tree.selectedItems():
+            item = selected
+            while item is not None:
+                key = item.data(0, Qt.UserRole + 1)
+                if key is not None:
+                    keys.add(tuple(key))
+                    break
+                item = item.parent()
+        if len(keys) != 1:
+            QMessageBox.warning(self, "Select One Sample", "Select one sample or its files.")
+            return
+        key = keys.pop()
+        info = self.scan_result.samples[key]
+        offset, accepted = QInputDialog.getDouble(
+            self, "Voltage Correction",
+            f"Sample {info.sample_id} | {info.animal_id}\nVoltage offset (mV):",
+            info.voltage_offset_mv, -2147483647, 2147483647, 3,
+        )
+        if not accepted or offset == info.voltage_offset_mv:
+            return
+        info.voltage_offset_mv = offset
+        self.results.clear()
+        self._qc_reviews.clear()
+        self._qc_contexts.clear()
+        self._analysis_samples = {}
+        self._undo_qc_btn.setEnabled(False)
+        for index in range(self.tree.topLevelItemCount()):
+            animal = self.tree.topLevelItem(index)
+            for row in range(animal.childCount()):
+                sample = animal.child(row)
+                if tuple(sample.data(0, Qt.UserRole + 1)) == key:
+                    sample.setText(1, f"Offset: {offset:+g} mV" if offset else "")
+        if self._active_note_path:
+            self.trace_viewer.plot_abf(
+                self._active_note_path,
+                voltage_offset_mv=self._sample_for_path(self._active_note_path).voltage_offset_mv,
+            )
+        self.statusbar.showMessage(f"Sample {info.sample_id}: offset {offset:+g} mV. Run analysis to update results.")
 
     def _save_active_note(self):
         if self._active_note_path is None:
@@ -534,20 +589,14 @@ class MainWindow(QMainWindow):
     def _on_baseline_flags_found(
         self, flags: list[tuple[str, BaselineFlag]],
     ):
-        dialog = BaselineReviewDialog(flags, self)
+        info = self._sample_for_path(flags[0][1].file_path)
+        dialog = BaselineReviewDialog(flags, self, voltage_offset_mv=info.voltage_offset_mv)
         accepted = dialog.exec()
         if not self._worker:
             return
         if accepted:
-            review = BaselineReview(decisions=dialog.decisions)
-            rejected_paths = {
-                path
-                for path, keep in review.decisions.items()
-                if not keep
-            }
-            self._analysis_samples = exclude_protocol_paths(
-                self._analysis_samples, rejected_paths
-            )
+            review = BaselineReview(decisions=dialog.decisions, excluded_sweeps=dialog.excluded_sweeps)
+            self._analysis_samples = apply_baseline_review(self._analysis_samples, review)
             self._worker.set_baseline_result(review)
         else:
             self._worker.cancel()
@@ -563,6 +612,7 @@ class MainWindow(QMainWindow):
     ):
         """Show QC review dialog on main thread, then unblock worker."""
         self._qc_contexts[ap_path] = (sample_id, replace(ap_result), rmp_mv, protocol_paths)
+        info = self._sample_for_path(ap_path)
         dlg = QCReviewDialog(
             sample_id,
             ap_path,
@@ -574,6 +624,8 @@ class MainWindow(QMainWindow):
             auto_rejected=rmp_mv >= ap_result.voltage_threshold_mv,
             can_go_back=can_go_back,
             initial_review=self._qc_reviews.get(ap_path),
+            voltage_offset_mv=info.voltage_offset_mv,
+            excluded_sweeps_by_path=info.excluded_sweeps,
         )
         dlg.exec()
         self._store_file_note(ap_path, dlg.notes)
@@ -612,6 +664,8 @@ class MainWindow(QMainWindow):
                 auto_rejected=rmp >= automatic_ap.voltage_threshold_mv,
                 can_go_back=cursor > 0,
                 initial_review=self._qc_reviews.get(path), completed=True,
+                voltage_offset_mv=self._analysis_samples[key].voltage_offset_mv,
+                excluded_sweeps_by_path=self._analysis_samples[key].excluded_sweeps,
             )
             dialog.exec()
             if dialog.accepted_result == "back":
@@ -633,7 +687,11 @@ class MainWindow(QMainWindow):
             return
 
     def _on_ri_ih_review_needed(self, sample_id, path, sweeps):
-        dialog = RiIhReviewDialog(sample_id, path, sweeps, self)
+        info = self._sample_for_path(path)
+        dialog = RiIhReviewDialog(
+            sample_id, path, sweeps, self, voltage_offset_mv=info.voltage_offset_mv,
+            excluded_sweeps=info.excluded_sweeps.get(path),
+        )
         dialog.exec()
         if dialog.accepted_result == "cancel":
             self._worker.cancel()
@@ -647,12 +705,15 @@ class MainWindow(QMainWindow):
         result: OneSAPResult,
     ):
         one_s_path = protocol_paths[PROTO_1S_AP]
+        info = self._sample_for_path(one_s_path)
         dlg = OneSAPReviewDialog(
             sample_id,
             protocol_paths,
             result,
             self,
             initial_note=self.file_notes.get(one_s_path, ""),
+            voltage_offset_mv=info.voltage_offset_mv,
+            excluded_sweeps_by_path=info.excluded_sweeps,
         )
         dlg.exec()
         self._store_file_note(one_s_path, dlg.notes)

@@ -66,13 +66,14 @@ def _inject_spikes(abf, target_sweep: int, n_spikes: int):
 
 
 class TestOneSAPReviewFlags:
-    def test_sudden_drop_flag_matches_sample_1533(self, abf_1s_ap_sudden_drop):
+    def test_sudden_drop_no_longer_requires_review(self, abf_1s_ap_sudden_drop):
         abf = load_abf(abf_1s_ap_sudden_drop)
 
         result = analyze_one_s_ap(abf)
 
-        assert result.sudden_drop_sweeps == [13]
-        assert result.sweeps[12].sudden_drop is True
+        assert result.sweeps[11].spike_count == 10
+        assert result.sweeps[12].spike_count == 1
+        assert result.requires_review is False
 
     def test_stimulus_baseline_flag_matches_sample_1669(
         self, abf_1s_ap_baseline_zero

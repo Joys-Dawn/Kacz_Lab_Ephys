@@ -1,300 +1,110 @@
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QButtonGroup,
-    QDialog,
-    QDialogButtonBox,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QRadioButton,
-    QStyle,
-    QStyledItemDelegate,
-    QStyleOptionViewItem,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QVBoxLayout,
-    QHeaderView,
-    QWidget,
+    QDialog, QHBoxLayout, QHeaderView, QLabel, QPushButton, QSplitter,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
 from ephys_analysis.core.types import BaselineFlag
 from ephys_analysis.gui.widgets.trace_viewer import TraceViewer
 
 
-class WrappedReasonDelegate(QStyledItemDelegate):
-    """Paint and size the Reason column as native wrapped item text."""
-
-    def __init__(self, view: QTreeWidget):
-        super().__init__(view)
-        self._view = view
-
-    def initStyleOption(self, option: QStyleOptionViewItem, index):
-        super().initStyleOption(option, index)
-        option.features |= QStyleOptionViewItem.WrapText
-        option.textElideMode = Qt.ElideNone
-
-    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
-        styled = QStyleOptionViewItem(option)
-        self.initStyleOption(styled, index)
-        text_width = max(80, self._view.columnWidth(index.column()) - 10)
-        bounds = styled.fontMetrics.boundingRect(
-            QRect(0, 0, text_width, 10_000),
-            Qt.TextWordWrap,
-            styled.text,
-        )
-        return QSize(text_width, max(36, bounds.height() + 10))
-
-
-def _sweep_ranges(sweeps: list[int]) -> str:
-    if not sweeps:
-        return ""
-    values = sorted(set(sweeps))
-    ranges = []
-    start = previous = values[0]
-    for value in values[1:]:
-        if value == previous + 1:
-            previous = value
-            continue
-        ranges.append(str(start) if start == previous else f"{start}-{previous}")
-        start = previous = value
-    ranges.append(str(start) if start == previous else f"{start}-{previous}")
-    return ", ".join(ranges)
-
-
-def _reason(flag: BaselineFlag) -> str:
-    reasons = []
-    if flag.out_of_range_sweeps:
-        reasons.append(
-            f"Outside {flag.target_mv - 10:g} to {flag.target_mv + 10:g} mV: "
-            f"sweeps {_sweep_ranges(flag.out_of_range_sweeps)}"
-        )
-    if flag.changed_sweep_pairs:
-        pairs = ", ".join(
-            f"{first}-{second}" for first, second in flag.changed_sweep_pairs
-        )
-        reasons.append(f">=4 mV successive change: pairs {pairs}")
-    return "\n".join(reasons)
-
-
 class BaselineReviewDialog(QDialog):
-    """Review baseline-flagged recordings before protocol analysis."""
+    """Review one flagged recording at a time for the current sample."""
 
-    def __init__(
-        self,
-        flags: list[tuple[str, BaselineFlag]],
-        parent=None,
-    ):
+    def __init__(self, flags: list[tuple[str, BaselineFlag]], parent=None, *, voltage_offset_mv=0.0):
         super().__init__(parent)
         self.setWindowTitle("Baseline QC Review")
         self.setModal(True)
+        self._flags = flags
+        self._index = 0
+        self._voltage_offset_mv = voltage_offset_mv
         self.decisions: dict[str, bool] = {}
-        self._decision_radios: dict[
-            str, tuple[QRadioButton, QRadioButton]
-        ] = {}
-        self._button_groups: list[QButtonGroup] = []
+        self.excluded_sweeps: dict[str, set[int]] = {}
 
         layout = QVBoxLayout(self)
-
-        heading = QHBoxLayout()
-        icon = QLabel()
-        icon.setPixmap(
-            self.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(24, 24)
-        )
-        heading.addWidget(icon)
-        sample_count = len({sample_id for sample_id, _ in flags})
-        summary = QLabel(
-            f"Review {len(flags)} flagged file"
-            f"{'s' if len(flags) != 1 else ''} across {sample_count} sample"
-            f"{'s' if sample_count != 1 else ''} before analysis"
-        )
-        summary.setStyleSheet("font-weight: bold;")
-        heading.addWidget(summary)
-        heading.addStretch()
-        layout.addLayout(heading)
-
-        instructions = QLabel(
-            "Preview each recording as needed, then choose Accept or Reject. "
-            "Rejected recordings will be excluded from analysis."
-        )
-        instructions.setWordWrap(True)
-        layout.addWidget(instructions)
-
-        bulk_actions = QHBoxLayout()
-        select_all = QPushButton("Select All")
-        select_all.clicked.connect(self._select_all)
-        bulk_actions.addWidget(select_all)
-        for label, accepted in (("Accept Selected", True), ("Reject Selected", False)):
-            button = QPushButton(label)
-            button.clicked.connect(
-                lambda checked=False, keep=accepted: self._decide_selected(keep)
-            )
-            bulk_actions.addWidget(button)
-        bulk_actions.addStretch()
-        layout.addLayout(bulk_actions)
-
-        self.table = QTreeWidget()
-        self.table.setHeaderLabels(
-            ["Sample", "File", "Protocol", "Reason", "Decision", ""]
-        )
-        self.table.setRootIsDecorated(False)
-        self.table.setAlternatingRowColors(True)
-        self.table.setUniformRowHeights(False)
-        self.table.setSelectionMode(QTreeWidget.NoSelection)
-        self.table.setWordWrap(False)
-        self.table.setTextElideMode(Qt.ElideRight)
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._reason_delegate = WrappedReasonDelegate(self.table)
-        self.table.setItemDelegateForColumn(3, self._reason_delegate)
-
-        for sample_id, flag in flags:
-            reason = _reason(flag)
-            values = [
-                sample_id,
-                Path(flag.file_path).name,
-                flag.protocol,
-                reason,
-            ]
-            item = QTreeWidgetItem(values)
-            item.setData(0, Qt.UserRole, flag.file_path)
-            item.setCheckState(0, Qt.Unchecked)
-            for column, value in enumerate(values):
-                item.setToolTip(column, value)
-            item.setToolTip(3, reason)
-            self.table.addTopLevelItem(item)
-
-            decision_widget = QWidget(self.table)
-            decision_layout = QHBoxLayout(decision_widget)
-            decision_layout.setContentsMargins(0, 0, 0, 0)
-            decision_layout.setSpacing(8)
-            accept_radio = QRadioButton("Accept")
-            reject_radio = QRadioButton("Reject")
-            group = QButtonGroup(self)
-            group.setExclusive(True)
-            group.addButton(accept_radio)
-            group.addButton(reject_radio)
-            self._button_groups.append(group)
-            self._decision_radios[flag.file_path] = (
-                accept_radio,
-                reject_radio,
-            )
-            accept_radio.toggled.connect(
-                lambda checked, path=flag.file_path: self._set_decision(
-                    path, True, checked
-                )
-            )
-            reject_radio.toggled.connect(
-                lambda checked, path=flag.file_path: self._set_decision(
-                    path, False, checked
-                )
-            )
-            decision_layout.addWidget(accept_radio)
-            decision_layout.addWidget(reject_radio)
-            self.table.setItemWidget(item, 4, decision_widget)
-
-            preview_button = QPushButton("Preview")
-            preview_button.clicked.connect(
-                lambda checked=False, path=Path(flag.file_path): self._preview(path)
-            )
-            preview_widget = QWidget(self.table)
-            preview_layout = QHBoxLayout(preview_widget)
-            preview_layout.setContentsMargins(3, 0, 3, 0)
-            preview_button.setFixedHeight(28)
-            preview_layout.addWidget(preview_button)
-            self.table.setItemWidget(item, 5, preview_widget)
-
-        header = self.table.header()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.Fixed)
-        header.setSectionResizeMode(5, QHeaderView.Fixed)
-        self.table.setColumnWidth(1, 160)
-        self.table.setColumnWidth(2, 160)
-        self.table.setColumnWidth(4, 210)
-        self.table.setColumnWidth(5, 90)
-        header.sectionResized.connect(self._schedule_row_layout)
-        layout.addWidget(self.table, stretch=1)
-
+        self.heading = QLabel()
+        self.heading.setWordWrap(True)
+        self.heading.setStyleSheet("font-weight: bold;")
+        layout.addWidget(self.heading)
         self.review_status = QLabel()
         layout.addWidget(self.review_status)
 
-        buttons = QDialogButtonBox()
-        self.continue_button = buttons.addButton(
-            "Continue Analysis", QDialogButtonBox.AcceptRole
-        )
-        self.continue_button.setDefault(True)
-        self.continue_button.setEnabled(False)
-        cancel_button = buttons.addButton(
-            "Cancel Analysis", QDialogButtonBox.RejectRole
-        )
-        cancel_button.clicked.connect(self.reject)
-        self.continue_button.clicked.connect(self.accept)
-        layout.addWidget(buttons)
-        self._update_review_status()
+        splitter = QSplitter(Qt.Vertical)
+        self.viewer = TraceViewer(self, figsize=(8, 4))
+        splitter.addWidget(self.viewer)
+        self.table = QTreeWidget()
+        self.table.setHeaderLabels([
+            "Include sweep", "Baseline (mV)", "Outside range (mV)", "Change >=4 mV (pairs)",
+        ])
+        self.table.setRootIsDecorated(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.setMinimumHeight(100)
+        self.table.itemChanged.connect(self._update_sweep_visibility)
+        splitter.addWidget(self.table)
+        splitter.setSizes([400, 180])
+        layout.addWidget(splitter, 1)
+
+        buttons = QHBoxLayout()
+        self.keep_button = QPushButton("Keep Selected Sweeps")
+        self.keep_button.clicked.connect(lambda: self._decide(True))
+        self.reject_button = QPushButton("Reject File")
+        self.reject_button.clicked.connect(lambda: self._decide(False))
+        self.cancel_button = QPushButton("Cancel Analysis")
+        self.cancel_button.clicked.connect(self.reject)
+        buttons.addStretch()
+        for button in (self.keep_button, self.reject_button, self.cancel_button):
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
 
         available = self.screen().availableGeometry()
-        width = min(1100, max(680, available.width() - 60))
-        content_height = 220 + min(len(flags), 12) * 34
-        height = min(680, max(420, content_height))
-        self.resize(
-            min(width, available.width() - 40),
-            min(height, available.height() - 40),
+        self.resize(min(1100, available.width() - 40), min(750, available.height() - 40))
+        self._show_file()
+
+    def _show_file(self):
+        sample_id, flag = self._flags[self._index]
+        self.heading.setText(f"Sample {sample_id} | {Path(flag.file_path).name}\n{flag.protocol}")
+        self.review_status.setText(
+            f"File {self._index + 1} of {len(self._flags)} | "
+            f"Voltage offset: {self._voltage_offset_mv:+g} mV"
         )
+        self.viewer.plot_abf(flag.file_path, voltage_offset_mv=self._voltage_offset_mv)
+        self.table.blockSignals(True)
+        self.table.clear()
+        for number, baseline in enumerate(flag.baseline_means_mv, start=1):
+            outside = (
+                f"{flag.target_mv - 10:g} to {flag.target_mv + 10:g}"
+                if number in flag.out_of_range_sweeps else ""
+            )
+            pairs = [f"{a}-{b}" for a, b in flag.changed_sweep_pairs if number in (a, b)]
+            item = QTreeWidgetItem([str(number), f"{baseline:.2f}", outside, ", ".join(pairs)])
+            item.setCheckState(0, Qt.Checked)
+            self.table.addTopLevelItem(item)
+        self.table.blockSignals(False)
+        self.keep_button.setEnabled(self.table.topLevelItemCount() > 0)
 
-    def _set_decision(self, path: str, accepted: bool, checked: bool):
-        if not checked:
-            return
-        self.decisions[path] = accepted
-        self._update_review_status()
+    def _update_sweep_visibility(self, item, column):
+        row = self.table.indexOfTopLevelItem(item)
+        self.viewer.ax.lines[row].set_visible(item.checkState(0) == Qt.Checked)
+        self.viewer.refresh()
+        self.keep_button.setEnabled(any(
+            self.table.topLevelItem(i).checkState(0) == Qt.Checked
+            for i in range(self.table.topLevelItemCount())
+        ))
 
-    def _select_all(self):
-        for row in range(self.table.topLevelItemCount()):
-            self.table.topLevelItem(row).setCheckState(0, Qt.Checked)
-
-    def _decide_selected(self, accepted: bool):
-        for row in range(self.table.topLevelItemCount()):
-            item = self.table.topLevelItem(row)
-            if item.checkState(0) == Qt.Checked:
-                radios = self._decision_radios[item.data(0, Qt.UserRole)]
-                radios[0 if accepted else 1].setChecked(True)
-
-    def _update_review_status(self):
-        decided = len(self.decisions)
-        total = len(self._decision_radios)
-        self.review_status.setText(f"{decided} of {total} files reviewed")
-        self.continue_button.setEnabled(decided == total)
-
-    def _schedule_row_layout(self, *args):
-        QTimer.singleShot(0, self._layout_rows)
-
-    def _layout_rows(self):
-        # Keep room for wrapped reasons when the window or columns get narrower.
-        fixed_width = sum(self.table.columnWidth(column) for column in (0, 4, 5))
-        available = self.table.viewport().width() - fixed_width - 140
-        widths = [self.table.columnWidth(column) for column in (1, 2)]
-        total = sum(widths)
-        if total > available:
-            minimum = self.table.header().minimumSectionSize()
-            for column, width in zip((1, 2), widths, strict=True):
-                self.table.setColumnWidth(column, max(minimum, width * available // total))
-        self.table.doItemsLayout()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._schedule_row_layout()
-
-    def _preview(self, path: Path):
-        dialog = QDialog(self)
-        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
-        dialog.setWindowTitle(f"Preview: {path.name}")
-        dialog.setMinimumSize(700, 450)
-        layout = QVBoxLayout(dialog)
-        viewer = TraceViewer(dialog, figsize=(7, 4))
-        viewer.plot_abf(path)
-        layout.addWidget(viewer)
-        dialog.show()
+    def _decide(self, keep: bool):
+        _, flag = self._flags[self._index]
+        self.decisions[flag.file_path] = keep
+        self.excluded_sweeps[flag.file_path] = {
+            row + 1 for row in range(self.table.topLevelItemCount())
+            if not keep or self.table.topLevelItem(row).checkState(0) != Qt.Checked
+        }
+        self._index += 1
+        if self._index == len(self._flags):
+            self.accept()
+        else:
+            self._show_file()

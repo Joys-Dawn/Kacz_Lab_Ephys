@@ -17,6 +17,8 @@ class SampleInfo:
     collection_date: str = ""  # e.g. "2026_02_04"
     experimenter: str = ""  # e.g. "JCA"
     protocols: dict[str, Path] = field(default_factory=dict)
+    voltage_offset_mv: float = 0.0
+    excluded_sweeps: dict[str, set[int]] = field(default_factory=dict)
 
 
 @dataclass

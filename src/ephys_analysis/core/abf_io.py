@@ -15,9 +15,22 @@ import pyabf
 import numpy as np
 from pathlib import Path
 
+from ephys_analysis.protocols import VOLTAGE_PROTOCOLS
 
-def load_abf(path: str | Path, load_data: bool = True) -> pyabf.ABF:
-    return pyabf.ABF(str(path), loadData=load_data)
+
+def load_abf(
+    path: str | Path, load_data: bool = True, *, voltage_offset_mv: float = 0.0,
+) -> pyabf.ABF:
+    abf = pyabf.ABF(str(path), loadData=load_data)
+    if not np.isfinite(voltage_offset_mv):
+        raise ValueError("Voltage offset must be finite")
+    if load_data and voltage_offset_mv and abf.protocol in VOLTAGE_PROTOCOLS:
+        if abf.sweepUnitsY.strip().casefold() != "mv":
+            raise ValueError(f"Cannot apply an mV offset to {abf.sweepUnitsY} data")
+        # Modify only this in-memory voltage channel, never the source ABF or current.
+        abf.data[0] += voltage_offset_mv
+        abf.setSweep(0)
+    return abf
 
 
 def get_protocol_name(abf: pyabf.ABF) -> str:

@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QPushButton
 
 
-def _drop_result() -> OneSAPResult:
+def _baseline_result() -> OneSAPResult:
     return OneSAPResult(
         sweeps=[
             OneSAPSweep(0.0, 0, 0.0, raw_spike_count=0),
@@ -17,10 +17,9 @@ def _drop_result() -> OneSAPResult:
                 1,
                 1.0,
                 raw_spike_count=1,
-                sudden_drop=True,
             ),
         ],
-        sudden_drop_sweeps=[3],
+        baseline_at_or_above_zero_sweeps=[3],
     )
 
 
@@ -44,7 +43,7 @@ class TestOneSAPReviewDialog:
     def test_non_high_firing_flag_shows_only_one_s_ap(
         self, qtbot, abf_1s_ap,
     ):
-        result = _drop_result()
+        result = _baseline_result()
         paths = {PROTO_1S_AP: str(abf_1s_ap)}
 
         dlg = OneSAPReviewDialog("1666", paths, result)
@@ -52,7 +51,7 @@ class TestOneSAPReviewDialog:
 
         assert dlg.rin_viewer is None
 
-    def test_ap_drop_flag_shows_both_sweep_counts(
+    def test_ap_drop_no_longer_shows_a_warning(
         self, qtbot, abf_1s_ap_sudden_drop,
     ):
         result = analyze_one_s_ap(load_abf(abf_1s_ap_sudden_drop))
@@ -63,15 +62,13 @@ class TestOneSAPReviewDialog:
         )
         qtbot.addWidget(dlg)
 
-        assert dlg.flag_label.text() == (
-            "AP drop: sweep 12 had 10 APs; sweep 13 had 1 AP"
-        )
+        assert dlg.flag_label.text() == ""
 
     def test_keep_records_true(self, qtbot, abf_1s_ap):
         dlg = OneSAPReviewDialog(
             "1666",
             {PROTO_1S_AP: str(abf_1s_ap)},
-            _drop_result(),
+            _baseline_result(),
         )
         qtbot.addWidget(dlg)
 
@@ -83,7 +80,7 @@ class TestOneSAPReviewDialog:
         dlg = OneSAPReviewDialog(
             "1666",
             {PROTO_1S_AP: str(abf_1s_ap)},
-            _drop_result(),
+            _baseline_result(),
         )
         qtbot.addWidget(dlg)
 
@@ -95,7 +92,7 @@ class TestOneSAPReviewDialog:
         dlg = OneSAPReviewDialog(
             "1666",
             {PROTO_1S_AP: str(abf_1s_ap)},
-            _drop_result(),
+            _baseline_result(),
             initial_note="Review note",
         )
         qtbot.addWidget(dlg)

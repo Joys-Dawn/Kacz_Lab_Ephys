@@ -9,13 +9,16 @@ from ephys_analysis.gui.widgets.plot_canvas import PlotCanvas
 class TraceViewer(PlotCanvas):
     """Widget for plotting ABF sweep traces (response + stimulus)."""
 
-    def plot_abf(self, path: str | Path, max_sweeps: int | None = None):
+    def plot_abf(
+        self, path: str | Path, max_sweeps: int | None = None, *,
+        voltage_offset_mv: float = 0.0, excluded_sweeps: set[int] | None = None,
+    ):
         """Load an ABF file and plot its sweeps.
 
         max_sweeps=None plots every sweep — needed for Ih (20 sweeps) and 1s
         AP firing (15 sweeps), which used to truncate at 10.
         """
-        abf = load_abf(path)
+        abf = load_abf(path, voltage_offset_mv=voltage_offset_mv)
         time = get_sweep_time(abf)
         n = abf.sweepCount if max_sweeps is None else min(abf.sweepCount, max_sweeps)
         sweeps = [get_sweep_data(abf, i, channel=0) for i in range(n)]
@@ -27,6 +30,10 @@ class TraceViewer(PlotCanvas):
             title=f"{Path(path).name} — {protocol}",
             ylabel=ylabel,
         )
+        if excluded_sweeps:
+            for number, line in enumerate(self.ax.lines, start=1):
+                line.set_visible(number not in excluded_sweeps)
+            self.refresh()
 
     def plot_sweeps(self, time: np.ndarray, sweeps: list[np.ndarray],
                     labels: list[str] | None = None,

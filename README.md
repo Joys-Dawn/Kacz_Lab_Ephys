@@ -50,21 +50,30 @@ Click **Load Nominal Variables** and pick an Excel file that maps each Sample # 
 
 ### 3. Run Analysis
 
+For a telegraphing voltage offset, select a sample or one of its files and click
+**Voltage Offset**. Enter the signed correction in mV (`-10` changes `-40` to
+`-50`). The same value applies to every sweep of protocols 2, 4, 5a/5b, 6, 7,
+8, 9 and 11, in previews, QC and both analysis modes. Current channels, EPSCs,
+membrane tests and original ABFs are unchanged. Corrections are held for the
+open project session; reopening the project resets them. Changing a correction
+clears previous results and QC decisions so analysis must be rerun before export.
+
 Click **Run Analysis**. The pipeline runs per sample in the order dictated by the QC gate:
 
 ```
-RMP → AP fine → (VThresh QC review) → Ri/Ih → Ramp → 1s AP → (flag review when needed) → 5/25/50 AHP
+Baseline sweep review → RMP → AP fine → (VThresh QC review) → Ri/Ih → Ramp → 1s AP → (flag review when needed) → 5/25/50 AHP
 ```
 
-Detailed analysis starts by checking the first 200 ms baseline of every
+Detailed analysis checks the current sample's first 200 ms baseline of every
 applicable voltage recording. EPSCs, membrane tests, non-mV recordings, and
 recordings shorter than 200 ms are excluded from this check. Flagged files are
-shown in a scrollable review before protocol analysis continues. Every flagged
-file can be previewed and must be explicitly accepted or rejected. Rejected
-recordings are removed from that sample's protocol set before analysis; the
-sample's other accepted recordings remain available.
-Select All and the per-row checkboxes support bulk Accept Selected or Reject Selected.
-Previews show every sweep, including previews opened from the duplicate resolver.
+reviewed one file at a time immediately before that sample's RMP/AP analysis and
+VThresh QC, not as an upfront list of all samples. Each review shows the traces
+and a scrollable sweep list with baseline values and flags. **Keep Selected Sweeps**
+retains the checked sweeps; **Reject File** removes only that recording. Original
+sweep numbers and nominal-current associations are preserved. Calculations use
+the retained sweeps, including reselecting the AP threshold sweep when necessary.
+No baseline flag automatically excludes data. Duplicate previews still show all sweeps.
 
 Every sample with RMP and AP threshold data then appears in VThresh QC. A
 sample whose RMP is more depolarized than its voltage threshold is labeled
@@ -122,12 +131,14 @@ is `-67 mV` for all applicable protocols except 5- and 25-spike AHP, which use
 - At least three pairs of adjacent sweeps differ by 4 mV or more.
 
 Baseline flags never reject a recording automatically. Detailed analysis waits
-for an explicit Accept or Reject decision for every flagged file, then excludes
-the rejected recordings before protocol analysis begins.
+for a sweep-selection or whole-file rejection decision for each flagged file in
+the current sample. Excluded sweeps do not contribute to later measurements or
+review flags. A sample with no baseline flags proceeds directly to normal QC.
 
 ### RMP
 
-The reported RMP is the mean voltage over the first 200 ms (0-0.2 s) of the first sweep.
+The reported RMP is the mean voltage over the first 200 ms (0-0.2 s) of the first
+retained sweep. With no sweep exclusions this remains the original first sweep.
 
 ### Input Resistance (Ri, MOhm)
 
@@ -191,7 +202,6 @@ For each sweep of the 1s AP protocol, spikes are counted using `scipy.signal.fin
 **Firing Frequency (Hz)** per sweep = spike count / step duration (1 s by default).
 
 **Review flags**:
-- **Sudden AP drop**: the current sweep has exactly 1 AP after the preceding sweep had at least 5 APs.
 - **Stimulus baseline**: the mean voltage over the first 200 ms inside the 1-second stimulus step is at or above 0 mV.
 - **High firing**: a sweep has at least 100 APs. The review dialog shows both the 1s AP and Ri/Ih recordings when Ri/Ih is available.
 

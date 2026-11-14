@@ -9,6 +9,7 @@ class RiIhReviewDialog(QDialog):
     def __init__(
         self, sample_id: str, path: str,
         sweeps: list[RiIhContaminatedSweep], parent=None,
+        *, voltage_offset_mv: float = 0.0, excluded_sweeps: set[int] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"Rin Review - Sample {sample_id}")
@@ -22,7 +23,7 @@ class RiIhReviewDialog(QDialog):
         summary.setWordWrap(True)
         layout.addWidget(summary)
         self.viewer = TraceViewer(self)
-        self.viewer.plot_abf(path)
+        self.viewer.plot_abf(path, voltage_offset_mv=voltage_offset_mv, excluded_sweeps=excluded_sweeps)
         layout.addWidget(self.viewer)
         buttons = QHBoxLayout()
         for label, result in (

@@ -23,6 +23,7 @@ CONTAMINATION_PROMINENCE_MV = 15.0
 def analyze_ri_ih(
     abf: pyabf.ABF,
     contamination_reviewer: Callable[[list[RiIhContaminatedSweep]], bool] | None = None,
+    excluded_sweeps: set[int] | None = None,
 ) -> RiIhResult | None:
     """Analyze Ri/Ih protocol for input resistance, sag amplitude, and sag ratio.
 
@@ -72,7 +73,7 @@ def analyze_ri_ih(
             response[ss_i0:ss_i1], rate, threshold_mv=0.0,
             min_prominence_mv=CONTAMINATION_PROMINENCE_MV,
         )[0] > 0
-        if ap_in_bl or ap_in_ss:
+        if (ap_in_bl or ap_in_ss) and sweep_idx + 1 not in (excluded_sweeps or set()):
             contaminated_sweeps.append(RiIhContaminatedSweep(
                 sweep_num=sweep_idx + 1,
                 current_pa=currents[sweep_idx],
@@ -81,6 +82,7 @@ def analyze_ri_ih(
             ))
 
     contaminated_idx = {c.sweep_num - 1 for c in contaminated_sweeps}
+    contaminated_idx.update(number - 1 for number in (excluded_sweeps or set()))
     if (
         len(contaminated_sweeps) > 5
         and contamination_reviewer is not None

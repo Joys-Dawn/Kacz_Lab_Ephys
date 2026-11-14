@@ -19,23 +19,6 @@ def _sweep_text(sweeps: list[int]) -> str:
     return ", ".join(str(sweep) for sweep in sweeps)
 
 
-def _ap_count_text(count: int) -> str:
-    return f"{count} AP" if count == 1 else f"{count} APs"
-
-
-def _ap_drop_text(result: OneSAPResult) -> list[str]:
-    lines = []
-    for sweep_num in result.sudden_drop_sweeps:
-        previous_count = result.sweeps[sweep_num - 2].raw_spike_count
-        dropped_count = result.sweeps[sweep_num - 1].raw_spike_count
-        lines.append(
-            f"AP drop: sweep {sweep_num - 1} had "
-            f"{_ap_count_text(previous_count)}; sweep {sweep_num} had "
-            f"{_ap_count_text(dropped_count)}"
-        )
-    return lines
-
-
 class OneSAPReviewDialog(QDialog):
     """Review a 1-second AP recording that triggered one or more flags."""
 
@@ -46,6 +29,8 @@ class OneSAPReviewDialog(QDialog):
         result: OneSAPResult,
         parent=None,
         initial_note: str = "",
+        voltage_offset_mv: float = 0.0,
+        excluded_sweeps_by_path: dict[str, set[int]] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"1s AP Review - Sample {sample_id}")
@@ -67,8 +52,6 @@ class OneSAPReviewDialog(QDialog):
         layout.addWidget(header)
 
         flags = []
-        if result.sudden_drop_sweeps:
-            flags.extend(_ap_drop_text(result))
         if result.baseline_at_or_above_zero_sweeps:
             flags.append(
                 "Stimulus baseline >= 0 mV at sweep(s): "
@@ -85,14 +68,20 @@ class OneSAPReviewDialog(QDialog):
 
         plots = QHBoxLayout()
         self.one_s_viewer = TraceViewer(self, figsize=(7, 4))
-        self.one_s_viewer.plot_abf(one_s_path)
+        baseline_excluded = {i for i, sweep in enumerate(result.sweeps, 1) if sweep.excluded}
+        self.one_s_viewer.plot_abf(
+            one_s_path, voltage_offset_mv=voltage_offset_mv, excluded_sweeps=baseline_excluded,
+        )
         plots.addWidget(self.one_s_viewer)
 
         self.rin_viewer: TraceViewer | None = None
         rin_path = protocol_paths.get(PROTO_RI_IH)
         if result.high_firing_sweeps and rin_path:
             self.rin_viewer = TraceViewer(self, figsize=(7, 4))
-            self.rin_viewer.plot_abf(rin_path)
+            self.rin_viewer.plot_abf(
+                rin_path, voltage_offset_mv=voltage_offset_mv,
+                excluded_sweeps=(excluded_sweeps_by_path or {}).get(rin_path),
+            )
             plots.addWidget(self.rin_viewer)
             self.setMinimumWidth(1200)
         layout.addLayout(plots)
@@ -107,6 +96,9 @@ class OneSAPReviewDialog(QDialog):
                 f"{sweep.firing_freq_hz:g}",
             ])
             item.setCheckState(0, Qt.Unchecked if sweep.excluded else Qt.Checked)
+            if sweep.excluded:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                item.setToolTip(0, "Excluded during baseline review")
             self.sweep_table.addTopLevelItem(item)
         self.sweep_table.itemChanged.connect(self._update_sweep_visibility)
         layout.addWidget(self.sweep_table)

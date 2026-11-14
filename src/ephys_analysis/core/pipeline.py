@@ -1,6 +1,6 @@
 """Analysis pipeline — pure business logic, no GUI dependencies.
 
-Detailed analysis reviews baseline flags before processing samples, then runs
+Detailed analysis reviews each sample's baseline flags and selected sweeps, then runs
 RMP → AP fine → QC review/gate → Ri/Ih → Ramp → 1s AP → flagged-file
 review → AHPs. Quick Analysis runs selected protocols with every QC path
 disabled. Review steps use callbacks so the business logic remains independent
@@ -103,6 +103,53 @@ def exclude_protocol_paths(
     }
 
 
+def apply_baseline_review(
+    samples: dict[tuple[str, str], SampleInfo], review: BaselineReview,
+) -> dict[tuple[str, str], SampleInfo]:
+    retained = exclude_protocol_paths(
+        samples, {path for path, keep in review.decisions.items() if not keep},
+    )
+    return {
+        key: replace(info, excluded_sweeps={
+            **info.excluded_sweeps,
+            **{str(path): set(review.excluded_sweeps[str(path)])
+               for path in info.protocols.values()
+               if str(path) in review.excluded_sweeps},
+        })
+        for key, info in retained.items()
+    }
+
+
+def _review_sample_baselines(info: SampleInfo, reviewer: BaselineReviewer) -> SampleInfo:
+    flags = []
+    for protocol, path in info.protocols.items():
+        try:
+            flag = analyze_baseline_qc(
+                load_abf(path, voltage_offset_mv=info.voltage_offset_mv),
+                protocol=protocol, file_path=str(path),
+            )
+        except Exception as e:
+            logger.error("Baseline check failed for %s (%s): %s", info.sample_id, path, e, exc_info=True)
+            continue
+        if flag is not None:
+            flags.append((info.sample_id, flag))
+    if not flags:
+        return info
+    review = _normalize_baseline_review(reviewer(flags))
+    missing = {flag.file_path for _, flag in flags} - review.decisions.keys()
+    if missing:
+        raise ValueError(f"Baseline review did not decide every flagged file: {', '.join(sorted(missing))}")
+    for _, flag in flags:
+        excluded = review.excluded_sweeps.get(flag.file_path, set())
+        all_sweeps = set(range(1, len(flag.baseline_means_mv) + 1))
+        if excluded - all_sweeps:
+            raise ValueError(f"Invalid sweep selection for {flag.file_path}")
+        if all_sweeps and excluded == all_sweeps:
+            review.decisions[flag.file_path] = False
+    key = (info.animal_id, info.sample_id)
+    return apply_baseline_review({key: info}, review)[key]
+
+
 def apply_qc_review(result: SampleResult, ap_path: str, review: QCReview) -> None:
     """Apply a decision to the original automatic threshold, including on undo."""
     initial_status = apply_qc_gate(result.rmp.rmp_mv, result.ap_fine.voltage_threshold_mv)
@@ -157,10 +204,17 @@ def analyze_sample(  # noqa: C901
 
     protocols = info.protocols
 
+    def load_protocol(protocol):
+        return load_abf(protocols[protocol], voltage_offset_mv=info.voltage_offset_mv)
+
+    def sweep_options(protocol):
+        excluded = info.excluded_sweeps.get(str(protocols[protocol]), set())
+        return {"excluded_sweeps": excluded} if excluded else {}
+
     # 1. RMP
     if PROTO_RMP in protocols:
-        abf = load_abf(protocols[PROTO_RMP])
-        result.rmp = analyze_rmp(abf)
+        abf = load_protocol(PROTO_RMP)
+        result.rmp = analyze_rmp(abf, **sweep_options(PROTO_RMP))
 
     # 2. AP fine (or coarse fallback)
     # Three possibilities: (a) fine file present and has a spike → use fine;
@@ -170,12 +224,12 @@ def analyze_sample(  # noqa: C901
     ap_path = None
     if PROTO_AP_FINE in protocols:
         ap_path = protocols[PROTO_AP_FINE]
-        abf = load_abf(ap_path)
-        result.ap_fine = analyze_ap_fine(abf)
+        abf = load_protocol(PROTO_AP_FINE)
+        result.ap_fine = analyze_ap_fine(abf, **sweep_options(PROTO_AP_FINE))
         if result.ap_fine is None and PROTO_AP_COARSE in protocols:
             coarse_path = protocols[PROTO_AP_COARSE]
-            coarse_abf = load_abf(coarse_path)
-            coarse_result = analyze_ap_coarse(coarse_abf)
+            coarse_abf = load_protocol(PROTO_AP_COARSE)
+            coarse_result = analyze_ap_coarse(coarse_abf, **sweep_options(PROTO_AP_COARSE))
             if coarse_result is not None:
                 result.ap_fine = coarse_result
                 ap_path = coarse_path
@@ -183,8 +237,8 @@ def analyze_sample(  # noqa: C901
                 result.ap_used_coarse_fallback = True
     elif PROTO_AP_COARSE in protocols:
         ap_path = protocols[PROTO_AP_COARSE]
-        abf = load_abf(ap_path)
-        result.ap_fine = analyze_ap_coarse(abf)
+        abf = load_protocol(PROTO_AP_COARSE)
+        result.ap_fine = analyze_ap_coarse(abf, **sweep_options(PROTO_AP_COARSE))
         result.ap_source_is_coarse = True
 
     # 3. QC gate
@@ -209,7 +263,7 @@ def analyze_sample(  # noqa: C901
     # samples too; QC status only gates downstream group statistics, not
     # whether the per-sample number is computed.
     if PROTO_RI_IH in protocols:
-        abf = load_abf(protocols[PROTO_RI_IH])
+        abf = load_protocol(PROTO_RI_IH)
 
         def review_contamination(sweeps):
             result.ri_ih_contaminated_sweeps = sweeps
@@ -218,19 +272,21 @@ def analyze_sample(  # noqa: C901
             )
 
         if ri_ih_reviewer and not skip_qc:
-            result.ri_ih = analyze_ri_ih(abf, contamination_reviewer=review_contamination)
+            result.ri_ih = analyze_ri_ih(
+                abf, contamination_reviewer=review_contamination, **sweep_options(PROTO_RI_IH),
+            )
         else:
-            result.ri_ih = analyze_ri_ih(abf)
+            result.ri_ih = analyze_ri_ih(abf, **sweep_options(PROTO_RI_IH))
 
     if PROTO_RAMP in protocols:
-        abf = load_abf(protocols[PROTO_RAMP])
-        result.ramp = analyze_ramp(abf)
+        abf = load_protocol(PROTO_RAMP)
+        result.ramp = analyze_ramp(abf, **sweep_options(PROTO_RAMP))
 
     if PROTO_1S_AP in protocols:
-        abf = load_abf(protocols[PROTO_1S_AP])
+        abf = load_protocol(PROTO_1S_AP)
         ithresh = result.ap_fine.current_threshold_pa if result.ap_fine else 0.0
         rheobase = result.ramp.rheobase_pa if result.ramp else 0.0
-        result.one_s_ap = analyze_one_s_ap(abf, ithresh, rheobase)
+        result.one_s_ap = analyze_one_s_ap(abf, ithresh, rheobase, **sweep_options(PROTO_1S_AP))
 
         if (
             result.one_s_ap.requires_review
@@ -247,28 +303,29 @@ def analyze_sample(  # noqa: C901
             one_s_path = str(protocols[PROTO_1S_AP])
             if review.notes is not None:
                 _set_file_note(notes_by_path, one_s_path, review.notes)
+            excluded = info.excluded_sweeps.get(one_s_path, set()) | review.excluded_sweeps
             if not review.accepted or (
                 result.one_s_ap.sweeps
-                and review.excluded_sweeps == set(range(1, len(result.one_s_ap.sweeps) + 1))
+                and excluded >= set(range(1, len(result.one_s_ap.sweeps) + 1))
             ):
                 result.one_s_ap = None
-            elif review.excluded_sweeps:
+            elif excluded:
                 result.one_s_ap = analyze_one_s_ap(
                     abf, ithresh, rheobase,
-                    excluded_sweeps=review.excluded_sweeps,
+                    excluded_sweeps=excluded,
                 )
 
     if PROTO_AHP_5 in protocols:
-        abf = load_abf(protocols[PROTO_AHP_5])
-        result.ahp_5 = analyze_ahp(abf, AHP_5)
+        abf = load_protocol(PROTO_AHP_5)
+        result.ahp_5 = analyze_ahp(abf, AHP_5, **sweep_options(PROTO_AHP_5))
 
     if PROTO_AHP_25 in protocols:
-        abf = load_abf(protocols[PROTO_AHP_25])
-        result.ahp_25 = analyze_ahp(abf, AHP_25)
+        abf = load_protocol(PROTO_AHP_25)
+        result.ahp_25 = analyze_ahp(abf, AHP_25, **sweep_options(PROTO_AHP_25))
 
     if PROTO_AHP_50 in protocols:
-        abf = load_abf(protocols[PROTO_AHP_50])
-        result.ahp_50 = analyze_ahp(abf, AHP_50)
+        abf = load_protocol(PROTO_AHP_50)
+        result.ahp_50 = analyze_ahp(abf, AHP_50, **sweep_options(PROTO_AHP_50))
 
     result.notes = format_sample_notes(info, notes_by_path)
     return result
@@ -306,50 +363,6 @@ def analyze_all(
     results = []
     items = list(samples.items())
 
-    if not skip_qc and baseline_reviewer:
-        baseline_flags = []
-        for (_, sample_id), info in items:
-            for protocol, path in info.protocols.items():
-                try:
-                    flag = analyze_baseline_qc(
-                        load_abf(path),
-                        protocol=protocol,
-                        file_path=str(path),
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Baseline check failed for %s (%s): %s",
-                        sample_id,
-                        path,
-                        e,
-                        exc_info=True,
-                    )
-                    continue
-                if flag is not None:
-                    baseline_flags.append((sample_id, flag))
-        if baseline_flags:
-            review = _normalize_baseline_review(
-                baseline_reviewer(baseline_flags)
-            )
-            flagged_paths = {flag.file_path for _, flag in baseline_flags}
-            missing_decisions = flagged_paths - review.decisions.keys()
-            if missing_decisions:
-                missing = ", ".join(sorted(missing_decisions))
-                raise ValueError(
-                    f"Baseline review did not decide every flagged file: {missing}"
-                )
-            rejected_paths = {
-                path
-                for path in flagged_paths
-                if not review.decisions[path]
-            }
-            if rejected_paths:
-                items = list(
-                    exclude_protocol_paths(
-                        dict(items), rejected_paths
-                    ).items()
-                )
-
     # Keep automatic inputs so Back changes QC without repeating protocol reviews.
     qc_history: list[tuple[int, str, str, APFineResult, float]] = []
     notes_by_path = file_notes if file_notes is not None else {}
@@ -384,6 +397,10 @@ def analyze_all(
 
         if progress_callback:
             progress_callback(idx, f"Analyzing sample {sample_id}...")
+
+        if not skip_qc and baseline_reviewer:
+            info = _review_sample_baselines(info, baseline_reviewer)
+            items[idx] = ((animal_id, sample_id), info)
 
         try:
             result = analyze_sample(

@@ -292,8 +292,8 @@ class TestBaselineReview:
             ),
         )
 
-        assert events[0] == ("baseline", [("1666", flag)])
-        assert events[1][0] == "progress"
+        assert events[0][0] == "progress"
+        assert events[1] == ("baseline", [("1666", flag)])
         assert results[0].rmp is not None
 
     def test_rejected_file_is_removed_before_analysis_without_mutating_scan(
@@ -403,7 +403,7 @@ class TestBaselineReview:
 class TestOneSAPFlagReview:
     @staticmethod
     def _flagged_result(*args, **kwargs):
-        return OneSAPResult(sudden_drop_sweeps=[2])
+        return OneSAPResult(high_firing_sweeps=[2])
 
     def test_remove_excludes_only_one_s_ap_recording(
         self, sample_1666_info, monkeypatch,
